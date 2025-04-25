@@ -44,9 +44,10 @@ hello.kpm: ${objs}
 
 
 .PHONY: clean
+ifeq ($(OS), Windows_NT)
 clean:
-	ifeq ($(OS), Windows_NT)
-		del /Q *.o *.kpm
-	else
-		rm -rf *.o *.kpm
-	endif
+	del /Q *.o *.kpm
+else
+clean:
+	rm -rf *.o *.kpm
+endif

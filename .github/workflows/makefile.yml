@@ -15,25 +15,62 @@ jobs:
         working-directory: ${{ github.workspace }}
 
     steps:
-      # 步骤1：拉取代码（19-23行）
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # 拉全代码，避免文件缺失
+          show-progress: true
         continue-on-error: false
 
-      # 步骤2：安装依赖（26-47行）
       - name: Install build dependencies
         run: |
-          # 换国内阿里云源，规避Runner访问超时
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
-          # 更新源缓存+修复依赖残缺
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
           sudo apt-get install -f -y
-          # 安装核心编译依赖（语法合规）
           sudo apt-get install -y --no-install-recommends \
             build-essential \
+            autoconf \
+            automake \
+            libtool \
+            texinfo \
+            pkg-config
+          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+          # 校验依赖工具完整性
+          autoconf --version || exit 1
+          automake --version || exit 1
+        continue-on-error: false
+
+      # 关键新增：生成configure脚本（解决"找不到configure"核心问题）
+      - name: Generate configure script
+        run: |
+          # autoreconf强制生成configure，适配无预编译脚本的项目
+          autoreconf -i -f
+          # 验证脚本是否生成成功
+          if [ ! -f ./configure ]; then
+            echo "Error: configure script not generated!"
+            ls -la  # 打印根目录文件，方便排查
+            exit 1
+          fi
+        continue-on-error: false
+
+      - name: Generate Makefile (configure)
+        run: ./configure
+        continue-on-error: false
+
+      - name: Compile project
+        run: |
+          echo "=== Start compiling ==="
+          make -j$(nproc) V=1
+        continue-on-error: false
+
+      - name: Run unit tests (make check)
+        run: make check
+        continue-on-error: false
+
+      - name: Verify release package (make distcheck)
+        run: make distcheck
+        continue-on-error: false
             autoconf \
             automake \
             libtool \

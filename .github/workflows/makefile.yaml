@@ -1,4 +1,3 @@
-# 工作流程名称（贴合仓库模板定位）
 name: KPM-Build-Anywhere 轻量化自动化构建（缓存修复版）
 # 触发规则：匹配仓库分支规范（main生产/develop开发）
 on:

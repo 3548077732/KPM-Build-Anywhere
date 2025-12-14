@@ -48,6 +48,44 @@ jobs:
           md5sum --version || echo "md5sum已内置，无需安装"
         continue-on-error: false
 
+      # 核心新增步骤1：编译前校验关键头文件是否存在（提前排查缺失，杜绝编译中断）
+      - name: Check Critical Header Files Existence
+        run: |
+          set -euo pipefail; set -x
+          # 定义需要校验的头文件（含路径，覆盖内核默认+自定义/第三方）
+          declare -a REQUIRED_HEADERS=(
+            # 内核默认核心头文件
+            "${{ github.workspace }}/hello.c"  # 自身源码文件（确保检出正常）
+            "/home/runner/android-kernel-source/include/linux/compiler.h"
+            "/home/runner/android-kernel-source/arch/arm64/include/asm/rwonce.h"
+            # 自定义/第三方头文件（重点校验kpmodule.h，适配2种常见存放位置）
+            "${{ github.workspace }}/kpmodule.h"  # 项目根目录
+            "${{ github.workspace }}/include/kpmodule.h"  # 项目include子目录
+          )
+
+          # 遍历校验，缺失则报错并提示解决方案
+          for HEADER in "${REQUIRED_HEADERS[@]}"; do
+            if [ ! -f "${HEADER}" ]; then
+              # 特殊处理kpmodule.h（自定义头文件，给出具体排查方向）
+              if [[ "${HEADER}" == *"kpmodule.h"* ]]; then
+                echo "❌ 自定义/第三方头文件 ${HEADER} 缺失！请确认："
+                echo "1. kpmodule.h 是否已放入项目根目录或 include 子目录；"
+                echo "2. 若为第三方依赖头文件，是否已下载对应依赖包并放置正确路径；"
+                echo "3. 头文件名是否拼写正确（区分大小写）。"
+                # 搜索项目内所有kpmodule相关文件，辅助排查
+                echo "🔍 项目内搜索kpmodule相关文件："
+                find ${PWD} -name "*kpmodule*" -type f 2>/dev/null || echo "无匹配文件"
+                exit 1
+              else
+                # 内核头文件缺失，提示重新下载内核源码
+                echo "❌ 内核头文件 ${HEADER} 缺失！请重新执行内核源码下载步骤。"
+                exit 1
+              fi
+            fi
+          done
+          echo "✅ 所有关键头文件均存在，编译前校验通过"
+        continue-on-error: false
+
       - name: Download Android Kernel Source (aarch64, API 31)
         run: |
           set -euo pipefail; set -x
@@ -110,12 +148,10 @@ jobs:
             echo -e "\n📥 尝试从源下载：${url}"
             sudo rm -f ${NDK_ZIP}
             echo "🔹 优先使用wget下载..."
-            # 修正1：wget命令反斜杠后无多余字符，格式规范
             sudo wget --no-cache --no-cookies --timeout=1200 \
               --tries=10 --retry-connrefused --waitretry=30 --progress=bar:force \
               --no-check-certificate -O ${NDK_ZIP} ${url} -S 2>&1 | grep "HTTP/" || {
                 echo "🔹 wget下载失败，切换curl重试..."
-                # 核心修正2：curl命令整理换行，反斜杠后纯净无空格，避免解析异常
                 sudo curl -fSL --connect-timeout 1200 --retry 10 --retry-delay 30 \
                   --retry-max-time 3600 --insecure -o ${NDK_ZIP} ${url} -w "HTTP状态码：%{http_code}\n" || {
                   echo "❌ 该源双工具下载均失败"
@@ -297,6 +333,8 @@ jobs:
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
+          # 核心修复1：补全所有可能的头文件搜索路径（覆盖内核+项目自定义/第三方，杜绝后续缺失）
+          PROJECT_ROOT=${PWD}
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \
             CC="${COMPILER}" \
@@ -307,10 +345,12 @@ jobs:
             CROSS_COMPILE=aarch64-linux-android- \
             KERNELDIR="${KERNEL_DIR}" \
             ARCH=arm64 \
-            CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm" || {
+            # 全量头文件路径：内核通用+架构专属+项目根目录+项目include子目录（覆盖所有场景）
+            CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm -I${PROJECT_ROOT} -I${PROJECT_ROOT}/include" || {
             echo "Error: 编译失败！"
             exit 1
           }
+          echo "✅ AArch64内核模块编译成功！"
         continue-on-error: false
 
       - name: Run tests (if supported)

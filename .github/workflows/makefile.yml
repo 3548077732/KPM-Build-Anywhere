@@ -57,13 +57,11 @@ jobs:
           echo "=== 开始多线程编译 ==="
           make -j$(nproc) V=1  # V=1 打印详细编译日志，报错可快速定位
           continue-on-error: false
-
-      # 测试：确保测试用例全过，失败明确反馈
+          
       - name: Run unit tests (make check)
         run: make check
         continue-on-error: false
 
-      # 发布包校验：标准流程，确保发布包完整性
       - name: Verify release package (make distcheck)
         run: make distcheck
         continue-on-error: false

@@ -12,7 +12,7 @@ ifndef TARGET_COMPILE
 endif
 
 ifndef KP_DIR
-    KP_DIR = ../KernelPatch-0.11.3
+    KP_DIR = ../KernelPatch-0.12.2
 endif
 
 CC = $(TARGET_COMPILE)aarch64-linux-android31-clang

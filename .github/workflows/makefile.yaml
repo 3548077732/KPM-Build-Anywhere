@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-22.04
     defaults:
       run:
-        # 终极合规修复：1. 去掉/usr/bin/（内置识别bash）；2. 强制用{0}占位符（GitHub Actions唯一规范）
-        shell: bash -euo pipefail -c 'set -x; {0}'
+        # 核心简化：用GitHub Actions内置bash，无任何自定义复杂语法，彻底规避引号/占位符错误
+        shell: bash
         working-directory: ${{ github.workspace }}
 
     steps:
@@ -38,6 +38,8 @@ jobs:
 
       - name: Install base dependencies
         run: |
+          # 脚本内显式开启：严格错误捕获+命令打印（替代复杂shell配置，功能不变）
+          set -euo pipefail; set -x
           sudo sed -i 's@http://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
           sudo sed -i 's@http://security.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
           sudo sed -i 's@https://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
@@ -50,6 +52,8 @@ jobs:
 
       - name: Download & Extract Android NDK (r25c, Super Fault-Tolerant)
         run: |
+          # 脚本内显式开启：严格错误捕获+命令打印
+          set -euo pipefail; set -x
           NDK_VERSION="r25c"
           CORRECT_NDK_MD5="7845ab5be16149828ebac818a087d4ab"
           MIN_NDK_SIZE=$((450 * 1024 * 1024))
@@ -167,6 +171,8 @@ jobs:
 
       - name: Verify AArch64 Compiler (Full Check)
         run: |
+          # 脚本内显式开启：严格错误捕获+命令打印
+          set -euo pipefail; set -x
           echo "=== 确认环境变量 ==="
           if [ -z "${NDK_HOME}" ] || [ -z "${NDK_TOOLCHAIN_BIN}" ]; then
             echo "Error: NDK_HOME/NDK_TOOLCHAIN_BIN缺失！"
@@ -213,6 +219,8 @@ jobs:
 
       - name: Compile AArch64 Kernel Module
         run: |
+          # 脚本内显式开启：严格错误捕获+命令打印
+          set -euo pipefail; set -x
           echo "=== 确认Makefile ==="
           ls -la | grep -E "Makefile|makefile"
           [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
@@ -233,9 +241,13 @@ jobs:
         continue-on-error: false
 
       - name: Run tests (if supported)
-        run: make check
+        run: |
+          set -euo pipefail; set -x
+          make check
         continue-on-error: true
 
       - name: Verify release (if supported)
-        run: make distcheck
+        run: |
+          set -euo pipefail; set -x
+          make distcheck
         continue-on-error: true

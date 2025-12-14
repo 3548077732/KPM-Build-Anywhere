@@ -1,4 +1,5 @@
-name: KPM-Build-Anywhere 轻量化自动化构建（缓存修复版）
+# 工作流程名称（贴合仓库模板定位）
+name: KPM-Build-Anywhere 轻量化自动化构建（缓存修复+语法修正版）
 # 触发规则：匹配仓库分支规范（main生产/develop开发）
 on:
   push:
@@ -97,19 +98,31 @@ jobs:
           if-no-files-found: error # 无产物直接报错，及时拦截异常
 
       ###########################################################################
-      # 步骤7：main分支专属：自动打版本+创建Release（模板发布辅助，可选启用）
+      # 步骤7：main分支专属：自动打版本+创建Release（语法修正核心，稳定无错）
       ###########################################################################
-      - name: 自动生成版本标签+创建Release
+      - name: 生成语义化版本标签
+        id: gen-version
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 内置密钥，无需手动配置
         run: |
           # 语义化版本自动递增（无历史标签从v1.0.0开始，适配模板版本管理）
           latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
           new_tag=$(echo $latest_tag | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
           git tag $new_tag && git push origin $new_tag
-          # 创建Release（附带产物，适配模板快速发布）
-          gh release create $new_tag \
-            kpm-build-output-${{ github.sha }}.zip \
-            --title "KPM构建产物发布 $new_tag" \
-            --body "📦 版本：$new_tag\n📝 提交哈希：${{ github.sha }}\n⏰ 发布时间：$(date +'%Y-%m-%d %H:%M:%S')"
+
+      - name: 创建GitHub Release（附带产物，语法修正版）
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2 # 用成熟Action，避免语法错误
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 内置密钥，无需手动配置
+        with:
+          tag_name: ${{ steps.gen-version.outputs.new_tag }} # 关联上一步生成的版本
+          release_name: KPM构建产物发布 ${{ steps.gen-version.outputs.new_tag }}
+          body: |
+            📦 发布版本：${{ steps.gen-version.outputs.new_tag }}
+            📝 构建提交哈希：${{ github.sha }}
+            ⏰ 发布时间：${{ github.event.head_commit.timestamp }}
+            📌 产物说明：轻量化构建静态资源，适配跨平台部署需求
+          files: kpm-build-output-${{ github.sha }}.zip # 附带打包产物
+          draft: false # 非草稿发布
+          prerelease: false # 正式版本

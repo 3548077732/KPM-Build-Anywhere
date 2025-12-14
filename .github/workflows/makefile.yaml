@@ -74,7 +74,15 @@ jobs:
             find ${KERNEL_DIR} -name "compiler.h" -type f | head -5
             exit 1
           fi
+          # 新增：校验ARM64架构asm头文件目录是否存在
+          ASM_DIR="${KERNEL_DIR}/arch/arm64/include/asm"
+          if [ ! -d ${ASM_DIR} ]; then
+            echo "❌ ARM64架构asm头文件目录缺失！"
+            find ${KERNEL_DIR}/arch -name "asm" -type d | head -5
+            exit 1
+          fi
           echo "✅ 内核源码下载完成，compiler.h路径：${COMPILER_H_PATH}"
+          echo "✅ ARM64 asm头文件目录：${ASM_DIR}"
           echo "KERNEL_DIR=${KERNEL_DIR}" >> $GITHUB_ENV
         continue-on-error: false
 
@@ -96,7 +104,7 @@ jobs:
           sudo mkdir -p ${NDK_UNZIP_DIR}
           sudo chmod -R 777 ${NDK_UNZIP_DIR}
           sudo chown -R runner:runner ${NDK_UNZIP_DIR}
-          ls -ld ${NDK_UNZIP_DIR}
+          ls -ld ${NDK_UNZIP ${NDK_UNZIP_DIR}
 
           download_ndk() {
             local url=$1
@@ -288,7 +296,7 @@ jobs:
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
-          # 核心修复：修正参数格式（每行1个参数，反斜杠后无多余字符，参数赋值无语法错误）
+          # 核心修复：CFLAGS补充ARM64架构专属头文件路径（asm目录）
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \
             CC="${COMPILER}" \
@@ -299,7 +307,7 @@ jobs:
             CROSS_COMPILE=aarch64-linux-android- \
             KERNELDIR="${KERNEL_DIR}" \
             ARCH=arm64 \
-            CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux" || {
+            CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm" || {
             echo "Error: 编译失败！"
             exit 1
           }

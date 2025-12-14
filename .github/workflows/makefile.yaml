@@ -91,7 +91,7 @@ jobs:
           set -euo pipefail; set -x
           KERNEL_VERSION="android12-5.10"
           KERNEL_DIR="/home/runner/android-kernel-source"
-          KERNEL_REPO="https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/common.git"
+          KERNEL_REPO="https://android.googlesource.com/kernel/common"
 
           sudo rm -rf ${KERNEL_DIR}
           sudo mkdir -p ${KERNEL_DIR}

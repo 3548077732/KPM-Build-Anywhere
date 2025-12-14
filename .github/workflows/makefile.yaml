@@ -1,411 +1,115 @@
-name: Android Kernel Module CI
-
+# 工作流程名称
+name: KPM-Build-Anywhere 自动化构建部署
+# 触发条件：指定分支的 push/PR 事件触发
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, develop ] # 仅监听主分支、开发分支推送
   pull_request:
-    branches: [ "main" ]
-  workflow_dispatch:
-    inputs:
-      build_desc:
-        description: '构建描述（可选）'
-        required: false
-        default: '手动触发内核模块构建'
-      build_env:
-        description: '构建环境'
-        required: true
-        default: 'production'
-        type: choice
-        options:
-          - production
-          - test
-      # 新增：容错开关，若确认无需kpmodule.h，可手动选择跳过校验（默认不跳过，保证严谨）
-      skip_kpmodule_check:
-        description: '是否跳过kpmodule.h头文件校验（仅当确认无需该文件时选择"是"）'
-        required: true
-        default: '是'
-        type: choice
-        options:
-          - 是
-          - 否
+    branches: [ main, develop ] # 仅监听目标为主/开发分支的 PR
 
+# 任务集合
 jobs:
-  build:
-    runs-on: ubuntu-22.04
-    defaults:
-      run:
-        shell: bash
-        working-directory: ${{ github.workspace }}
+  # 核心任务：构建+测试（全分支通用）
+  build-and-test:
+    # 运行环境：多系统兼容（轻量化项目可只保留 ubuntu-latest）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        # 若项目有固定技术栈（如 Node.js），可添加版本矩阵，示例：
+        # node-version: [ 16.x, 18.x ]
 
     steps:
-      - name: Checkout source code
+      # 步骤1：拉取仓库代码
+      - name: 拉取仓库源码
+        uses: actions/checkout@v4
+
+      # 步骤2：配置项目运行环境（按需修改，示例为 Node.js 场景，非 Node 项目可删除/替换）
+      - name: 配置 Node.js 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18.x # 替换为项目实际依赖的版本
+          cache: 'npm' # 缓存 npm 依赖，加速构建（yarn 项目改为 cache: 'yarn'）
+
+      # 步骤3：安装项目依赖（按需修改命令，适配项目包管理器）
+      - name: 安装依赖
+        run: |
+          npm install # npm 项目用此命令；yarn 用 yarn install；其他技术栈改对应命令（如 pip install）
+
+      # 步骤4：自动化构建（核心命令，必须替换为项目实际构建命令）
+      - name: 项目构建
+        run: npm run build # 示例：Vue/React 项目常用；非前端项目改对应命令（如 go build、mvn package）
+
+      # 步骤5：自动化测试（按需保留，无测试流程可删除）
+      - name: 自动化测试
+        run: npm run test # 替换为项目实际测试命令（如 pytest、go test）
+
+      # 步骤6：main 分支专属：打包构建产物（仅主分支执行，便于发布下载）
+      - name: 打包主分支产物（仅 main 分支）
+        if: github.ref == 'refs/heads/main' # 分支判断条件：仅 main 分支触发
+        run: |
+          # 打包命令（示例：压缩 dist 目录为 build-output.zip，按需修改目录和格式）
+          zip -r build-output-${{ github.sha }}.zip dist/ # ubuntu/macos 用；windows 可换 7z 命令或删除系统兼容
+
+      # 步骤7：main 分支专属：上传产物为 GitHub Artifact（可直接下载发布）
+      - name: 上传主分支构建产物
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kpm-build-output-${{ github.sha }} # 产物名称（带 commit 哈希，便于追溯）
+          path: build-output-${{ github.sha }}.zip # 产物路径，与步骤6打包路径一致
+          retention-days: 30 # 产物保留30天，按需调整
+
+  # 可选扩展任务：main 分支自动发布（若需推送到镜像仓库/云服务，可新增此任务）
+  deploy-to-release:
+    # 依赖 build-and-test 任务，构建测试通过后才执行发布
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    # 仅 main 分支 push 事件触发（PR 不触发发布）
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      # 步骤1：拉取代码（发布需源码/产物，按需选择）
+      - name: 拉取仓库源码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-        continue-on-error: false
+          fetch-depth: 0 # 拉取全提交记录，便于打标签
 
-      - name: Install base dependencies
+      # 步骤2：下载之前打包的构建产物（若发布需产物）
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: kpm-build-output-${{ github.sha }}
+          path: ./output
+
+      # 步骤3：自动打版本标签（按语义化版本，可手动指定或自动递增，示例自动递增补丁版）
+      - name: 生成版本标签
+        id: tag-version
         run: |
-          set -euo pipefail; set -x
-          sudo sed -i 's@http://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
-          sudo sed -i 's@http://security.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
-          sudo sed -i 's@https://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
-          sudo sed -i 's@https://security.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
-          sudo apt-get update -y --fix-missing --allow-releaseinfo-change
-          sudo apt-get install -y --no-install-recommends build-essential wget curl unzip findutils git
-          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
-          md5sum --version || echo "md5sum已内置，无需安装"
-        continue-on-error: false
+          # 获取最新标签，无标签则从 v1.0.0 开始
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          # 提取版本号并递增补丁版（如 v1.0.0 → v1.0.1）
+          new_tag=$(echo $latest_tag | awk -F. '{print $1"."$2"."$3+1}')
+          echo "new_tag=$new_tag" >> $GITHUB_ENV
 
-      - name: Download Android Kernel Source (aarch64, API 31)
+      # 步骤4：推送版本标签到远程仓库
+      - name: 推送版本标签
         run: |
-          set -euo pipefail; set -x
-          KERNEL_VERSION="android12-5.10"
-          KERNEL_DIR="/home/runner/android-kernel-source"
-          KERNEL_REPO="https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/common.git"
+          git tag ${{ env.new_tag }}
+          git push origin ${{ env.new_tag }}
 
-          sudo rm -rf ${KERNEL_DIR}
-          sudo mkdir -p ${KERNEL_DIR}
-          sudo chmod -R 777 ${KERNEL_DIR}
-          sudo chown -R runner:runner ${KERNEL_DIR}
-
-          git clone --depth 1 --branch ${KERNEL_VERSION} ${KERNEL_REPO} ${KERNEL_DIR} || {
-            echo "❌ 清华镜像克隆失败，切换官方镜像重试..."
-            git clone --depth 1 --branch ${KERNEL_VERSION} https://android.googlesource.com/kernel/common.git ${KERNEL_DIR} || {
-              echo "❌ 内核源码下载失败，终止流程"
-              exit 1
-            }
-          }
-
-          # 内核头文件多路径校验，提前确保核心目录存在
-          KERNEL_INCLUDE_DIRS=(
-            "${KERNEL_DIR}/include"
-            "${KERNEL_DIR}/include/linux"
-            "${KERNEL_DIR}/include/uapi"
-            "${KERNEL_DIR}/arch/arm64/include"
-            "${KERNEL_DIR}/arch/arm64/include/asm"
-            "${KERNEL_DIR}/arch/arm64/include/uapi"
-            "${KERNEL_DIR}/include/asm-generic"
-          )
-          for DIR in "${KERNEL_INCLUDE_DIRS[@]}"; do
-            if [ ! -d ${DIR} ]; then
-              echo "❌ 内核头文件目录 ${DIR} 缺失！"
-              exit 1
-            fi
-          done
-          echo "✅ 内核源码下载完成，所有核心头文件目录均存在"
-          echo "KERNEL_DIR=${KERNEL_DIR}" >> $GITHUB_ENV
-        continue-on-error: false
-
-      - name: Download & Extract Android NDK (r25c, Super Fault-Tolerant)
-        run: |
-          set -euo pipefail; set -x
-          NDK_VERSION="r25c"
-          CORRECT_NDK_MD5="7845ab5be16149828ebac818a087d4ab"
-          MIN_NDK_SIZE=$((450 * 1024 * 1024))
-          ALIYUN_NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
-          GOOGLE_NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
-          HUAWEI_NDK_URL="https://mirrors.huaweicloud.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
-          NDK_ZIP="/home/runner/ndk.zip"
-          NDK_UNZIP_DIR="/home/runner/android-ndk-unzip"
-          REAL_NDK_DIR=""
-
-          echo "🔧 清理旧文件..."
-          sudo rm -rf ${NDK_ZIP} ${NDK_UNZIP_DIR}
-          sudo mkdir -p ${NDK_UNZIP_DIR}
-          sudo chmod -R 777 ${NDK_UNZIP_DIR}
-          sudo chown -R runner:runner ${NDK_UNZIP_DIR}
-          ls -ld ${NDK_UNZIP_DIR}
-
-          download_ndk() {
-            local url=$1
-            echo -e "\n📥 尝试从源下载：${url}"
-            sudo rm -f ${NDK_ZIP}
-            echo "🔹 优先使用wget下载..."
-            sudo wget --no-cache --no-cookies --timeout=1200 \
-              --tries=10 --retry-connrefused --waitretry=30 --progress=bar:force \
-              --no-check-certificate -O ${NDK_ZIP} ${url} -S 2>&1 | grep "HTTP/" || {
-                echo "🔹 wget下载失败，切换curl重试..."
-                sudo curl -fSL --connect-timeout 1200 --retry 10 --retry-delay 30 \
-                  --retry-max-time 3600 --insecure -o ${NDK_ZIP} ${url} -w "HTTP状态码：%{http_code}\n" || {
-                  echo "❌ 该源双工具下载均失败"
-                  return 1
-                }
-              }
-            if [ ! -f ${NDK_ZIP} ] || [ ! -s ${NDK_ZIP} ]; then
-              echo "❌ 下载文件不存在/为空"
-              sudo rm -f ${NDK_ZIP}
-              return 1
-            fi
-            local zip_size=$(du -b ${NDK_ZIP} | awk '{print $1}')
-            echo "📏 压缩包体积：${zip_size}字节（约$(echo "scale=2; ${zip_size}/1024/1024" | bc)MB）"
-            if [ ${zip_size} -lt ${MIN_NDK_SIZE} ]; then
-              echo "❌ 体积过小，判定损坏"
-              sudo rm -f ${NDK_ZIP}
-              return 1
-            fi
-            local calc_md5=$(md5sum ${NDK_ZIP} | awk '{print $1}')
-            if [ "${calc_md5}" != "${CORRECT_NDK_MD5}" ]; then
-              echo "❌ MD5不匹配（预期：${CORRECT_NDK_MD5}，实际：${calc_md5}）"
-              sudo rm -f ${NDK_ZIP}
-              return 1
-            fi
-            echo "🔍 校验压缩包内结构（前20个文件）..."
-            local zip_file_count=$(sudo unzip -l ${NDK_ZIP} | wc -l)
-            if [ ${zip_file_count} -lt 10 ]; then
-              echo "❌ 压缩包内无有效内容，判定损坏"
-              sudo unzip -l ${NDK_ZIP}
-              sudo rm -f ${NDK_ZIP}
-              return 1
-            fi
-            echo "✅ 该源下载成功，压缩包完整且内含有效内容"
-            return 0
-          }
-
-          if download_ndk ${ALIYUN_NDK_URL}; then
-            echo -e "\n🎉 优先源（阿里云）下载成功"
-          elif download_ndk ${HUAWEI_NDK_URL}; then
-            echo -e "\n🎉 备用源1（华为镜像）下载成功"
-          elif download_ndk ${GOOGLE_NDK_URL}; then
-            echo -e "\n🎉 备用源2（谷歌官方）下载成功"
-          else
-            echo -e "\n❌ 3源双工具下载均失败"
-            exit 1
-          fi
-
-          echo -e "\n📦 解压NDK到 ${NDK_UNZIP_DIR}..."
-          sudo unzip -o -q ${NDK_ZIP} -d ${NDK_UNZIP_DIR} || {
-            echo "❌ 解压失败，查看压缩包内容..."
-            sudo unzip -l ${NDK_ZIP} | head -30
-            sudo rm -f ${NDK_ZIP}
-            exit 1
-          }
-          echo -e "\n📂 解压后目标目录内容（含子目录）："
-          ls -la ${NDK_UNZIP_DIR}/
-          unzip_file_count=$(find ${NDK_UNZIP_DIR} -type f | wc -l)
-          if [ ${unzip_file_count} -eq 0 ]; then
-            echo "❌ 解压后目录为空，无任何有效文件，判定解压失败"
-            echo "🔍 压缩包内完整文件列表（前50个）："
-            sudo unzip -l ${NDK_ZIP} | head -50
-            sudo rm -f ${NDK_ZIP}
-            exit 1
-          fi
-          echo "✅ 解压成功，共解压出 ${unzip_file_count} 个文件"
-
-          echo -e "\n🔍 动态查找真实NDK根目录..."
-          REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 2 -type d -exec test -d "{}/toolchains/llvm/prebuilt" \; -print | head -n1)
-          if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
-            REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -type d -exec test -d "{}/toolchains/llvm/prebuilt" \; -print | head -n1)
-          fi
-          if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
-            REAL_NDK_DIR=$(ls -d ${NDK_UNZIP_DIR}/*/ 2>/dev/null | head -n1)
-          fi
-          if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
-            echo "❌ 未找到真实NDK根目录，打印全量解压目录结构："
-            find ${NDK_UNZIP_DIR} -type d | head -30
-            sudo rm -f ${NDK_ZIP}
-            exit 1
-          fi
-          echo "✅ 真实NDK根目录：${REAL_NDK_DIR}"
-
-          sudo chmod -R 777 ${REAL_NDK_DIR}
-          sudo chown -R runner:runner ${REAL_NDK_DIR}
-
-          echo -e "\n✅ 校验工具链目录..."
-          ls -la ${REAL_NDK_DIR}/toolchains/
-          if [ ! -d "${REAL_NDK_DIR}/toolchains/llvm/prebuilt" ]; then
-            echo "❌ 工具链核心目录缺失！打印llvm目录内容："
-            ls -la ${REAL_NDK_DIR}/toolchains/llvm/ 2>/dev/null || echo "llvm目录不存在"
-            exit 1
-          fi
-
-          echo -e "\n🔍 查找AArch64 clang编译器..."
-          LLVM_BIN_DIR=$(find ${REAL_NDK_DIR}/toolchains/llvm/prebuilt -name "bin" -type d 2>/dev/null | head -n1)
-          echo "llvm工具链bin目录：${LLVM_BIN_DIR}"
-          
-          COMPILER=$(find ${LLVM_BIN_DIR} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
-          
-          if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
-            echo "🔹 精准查找失败，全路径兜底搜索..."
-            COMPILER=$(find ${REAL_NDK_DIR} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
-          fi
-          
-          if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
-            echo "❌ 未找到AArch64 clang编译器！打印所有clang相关工具："
-            find ${REAL_NDK_DIR} -name "*clang*" -type f 2>/dev/null | head -20
-            exit 1
-          fi
-          
-          NDK_TOOLCHAIN_BIN=$(dirname ${COMPILER})
-          echo "✅ 找到AArch64编译器：${COMPILER}"
-          echo "✅ 工具链二进制目录：${NDK_TOOLCHAIN_BIN}"
-
-          export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
-          echo "NDK_HOME=${REAL_NDK_DIR}" >> $GITHUB_ENV
-          echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
-          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
-          echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
-          echo "✅ NDK配置完成，工具链路径：${NDK_TOOLCHAIN_BIN}"
-        continue-on-error: false
-
-      - name: Verify AArch64 Compiler (Full Check)
-        run: |
-          set -euo pipefail; set -x
-          echo "=== 确认环境变量 ==="
-          if [ -z "${NDK_HOME}" ] || [ -z "${NDK_TOOLCHAIN_BIN}" ]; then
-            echo "Error: NDK_HOME/NDK_TOOLCHAIN_BIN缺失！"
-            echo "当前环境变量：$(env | grep NDK)"
-            exit 1
-          fi
-          echo "NDK_HOME: ${NDK_HOME}"
-          echo "NDK_TOOLCHAIN_BIN: ${NDK_TOOLCHAIN_BIN}"
-
-          echo "=== 确认编译器 ==="
-          if [ -z "${COMPILER:-}" ] || [ ! -f "${COMPILER:-}" ]; then
-            echo "🔹 编译器变量未定义/无效，兜底搜索..."
-            COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
-            if [ -z "${COMPILER}" ]; then
-              echo "Error: 编译器缺失！"
-              exit 1
-            fi
-          fi
-          echo "找到编译器：${COMPILER}"
-
-          echo "=== 校验编译器完整性 ==="
-          if [ ! -x "${COMPILER}" ]; then
-            echo "编译器无执行权限，赋权..."
-            sudo chmod 777 ${COMPILER}
-            if [ ! -x "${COMPILER}" ]; then
-              echo "Error: 赋权后仍无执行权限，文件信息："
-              file ${COMPILER}
-              exit 1
-            fi
-          fi
-          ${COMPILER} --version >/dev/null 2>&1 || {
-            echo "Error: 编译器脚本执行失败！文件信息："
-            file ${COMPILER}
-            exit 1
-          }
-
-          echo "=== 验证编译器版本 ==="
-          ${COMPILER} --version || {
-            echo "Error: 编译器执行失败！"
-            echo "编译器脚本核心内容（前10行）："
-            head -n 10 ${COMPILER}
-            exit 1
-          }
-          echo "✅ 编译器验证通过"
-          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
-        continue-on-error: false
-
-      - name: Check & Collect All Header Files Paths
-        run: |
-          set -euo pipefail; set -x
-          KERNEL_DIR=${KERNEL_DIR}
-          PROJECT_ROOT=${PWD}
-          CUSTOM_HEADER_PATHS=""
-
-          # 1. 校验自身源码文件
-          if [ ! -f "${PROJECT_ROOT}/hello.c" ]; then
-            echo "❌ 核心源码文件 hello.c 缺失！"
-            exit 1
-          fi
-
-          # 2. 校验内核核心头文件（覆盖所有隐藏关键目录）
-          KERNEL_REQUIRED_HEADERS=(
-            "${KERNEL_DIR}/include/linux/compiler.h"
-            "${KERNEL_DIR}/arch/arm64/include/asm/rwonce.h"
-            "${KERNEL_DIR}/include/uapi/linux/types.h"
-            "${KERNEL_DIR}/include/asm-generic/bug.h"
-          )
-          for HEADER in "${KERNEL_REQUIRED_HEADERS[@]}"; do
-            if [ ! -f "${HEADER}" ]; then
-              echo "❌ 内核头文件 ${HEADER} 缺失！"
-              find ${KERNEL_DIR} -name "$(basename ${HEADER})" -type f 2>/dev/null || echo "内核目录无此文件"
-              exit 1
-            fi
-          done
-
-          # 核心优化：柔性校验kpmodule.h，给出3种精准解决方法，避免盲目终止
-          echo -e "\n🔍 搜索自定义头文件 kpmodule.h..."
-          KP_MODULE_PATH=$(find ${PROJECT_ROOT} -name "kpmodule.h" -type f 2>/dev/null | head -n1)
-          if [ -z "${KP_MODULE_PATH}" ]; then
-            echo -e "\n⚠️  未找到自定义头文件 kpmodule.h，需手动处理以下3种情况之一："
-            echo "  1. 若需要该文件：将 kpmodule.h 上传至代码仓库（任意目录均可，配置会自动识别）；"
-            echo "  2. 若文件名写错：修正文件名（区分大小写，如 KPModule.h ≠ kpmodule.h）；"
-            echo "  3. 若无需该文件：删除 hello.c 中 '#include <kpmodule.h>' 这一行多余引用；"
-            echo -e "\n❌ 请处理后重新提交，当前流程终止（手动触发时可选择跳过该校验）"
-            exit 1
-          fi
-          # 找到文件则正常添加路径
-          KP_MODULE_DIR=$(dirname ${KP_MODULE_PATH})
-          CUSTOM_HEADER_PATHS="-I${KP_MODULE_DIR}"
-          echo "✅ 找到自定义头文件 kpmodule.h，路径：${KP_MODULE_PATH}，搜索路径：${KP_MODULE_DIR}"
-
-          # 3. 收集项目内所有include目录（批量添加，适配多目录存放）
-          PROJECT_INCLUDE_DIRS=$(find ${PROJECT_ROOT} -name "include" -type d 2>/dev/null | tr '\n' ' ')
-          for DIR in ${PROJECT_INCLUDE_DIRS}; do
-            CUSTOM_HEADER_PATHS="${CUSTOM_HEADER_PATHS} -I${DIR}"
-          done
-          echo "✅ 项目内所有include目录：${PROJECT_INCLUDE_DIRS}"
-
-          # 4. 拼接全量头文件搜索路径，导出为环境变量供编译使用
-          FULL_CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/include/uapi -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm -I${KERNEL_DIR}/arch/arm64/include/uapi -I${KERNEL_DIR}/include/asm-generic -I${PROJECT_ROOT} ${CUSTOM_HEADER_PATHS}"
-          echo "✅ 全量头文件搜索路径：${FULL_CFLAGS}"
-          echo "FULL_CFLAGS=${FULL_CFLAGS}" >> $GITHUB_ENV
-        continue-on-error: false
-
-      # 新增：手动触发时的容错步骤，跳过kpmodule.h校验（自动触发不生效）
-      - name: Skip kpmodule.h Check (Manual Trigger Only)
-        if: github.event.inputs.skip_kpmodule_check == '是'
-        run: |
-          set -euo pipefail; set -x
-          KERNEL_DIR=${KERNEL_DIR}
-          PROJECT_ROOT=${PWD}
-          # 拼接不含kpmodule.h的全量路径（假设无需该文件，已删除代码引用）
-          FULL_CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/include/uapi -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm -I${KERNEL_DIR}/arch/arm64/include/uapi -I${KERNEL_DIR}/include/asm-generic -I${PROJECT_ROOT}"
-          echo "⚠️  已手动选择跳过kpmodule.h校验，若编译失败请确认已删除代码中该文件的引用"
-          echo "FULL_CFLAGS=${FULL_CFLAGS}" >> $GITHUB_ENV
-        continue-on-error: false
-
-      - name: Compile AArch64 Kernel Module
-        run: |
-          set -euo pipefail; set -x
-          echo "=== 确认Makefile ==="
-          ls -la | grep -E "Makefile|makefile"
-          [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
-          echo "=== Makefile核心内容（前50行） ==="
-          head -n 50 Makefile 2>/dev/null
-
-          # 使用预先生成的全量头文件路径，强制传递给编译器
-          PROJECT_ROOT=${PWD}
-          echo "=== 开始交叉编译 ==="
-          make -j$(nproc) V=2 \
-            CC="${COMPILER}" \
-            CXX=$(find ${NDK_HOME} -name "aarch64-linux-android*-clang++" -type f 2>/dev/null | head -n1) \
-            TARGET_ARCH=aarch64 \
-            TARGET_API=31 \
-            NDK="${NDK_HOME}" \
-            CROSS_COMPILE=aarch64-linux-android- \
-            KERNELDIR="${KERNEL_DIR}" \
-            ARCH=arm64 \
-            CFLAGS="${FULL_CFLAGS}" \
-            EXTRA_CFLAGS="${FULL_CFLAGS}" || {
-            echo "Error: 编译失败！"
-            echo "当前生效的头文件搜索路径：${FULL_CFLAGS}"
-            exit 1
-          }
-          echo "✅ AArch64内核模块编译成功！"
-        continue-on-error: false
-
-      - name: Run tests (if supported)
-        run: |
-          set -euo pipefail; set -x
-          make check
-        continue-on-error: true
-
-      - name: Verify release (if supported)
-        run: |
-          set -euo pipefail; set -x
-          make distcheck
-        continue-on-error: true
+      # 步骤5：创建 GitHub Release（自动生成发布记录，附带产物）
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.new_tag }} # 版本标签
+          release_name: 版本发布 ${{ env.new_tag }} # 发布标题
+          body: |
+            ## 版本更新内容
+            - 自动构建产物发布
+            - 提交哈希：${{ github.sha }}
+            - 发布时间：${{ github.event.head_commit.timestamp }}
+          files: ./output/build-output-${{ github.sha }}.zip # 附带构建产物，支持下载
+          draft: false # 非草稿发布
+          prerelease: false # 非预发布
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub 内置密钥，无需手动配置

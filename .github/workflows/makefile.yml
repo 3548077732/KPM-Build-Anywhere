@@ -20,20 +20,48 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 关键修复：修正apt命令语法，解决--no-install-recommends报错，强化容错
       - name: Install build dependencies
         run: |
-          # 1. 换国内阿里云源（必加，避免国外源超时/包缺失，适配GitHub Runner）
+          # 换国内阿里云源，避免国外源超时
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
-          # 2. 强制更新源缓存，修复缺失索引，避免包查找失败
+          # 更新源缓存+修复依赖
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
-          # 3. 自动修复残缺依赖，清理无效包，杜绝安装阻塞
           sudo apt-get install -f -y
-          # 4. 核心修复：--no-install-recommends移至正确位置（install后、包列表前）
+          # 正确安装依赖（--no-install-recommends 位置合规）
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             autoconf \
+            automake \
+            libtool \
+            texinfo \
+            pkg-config
+          # 清理缓存释放空间
+          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+          # 校验核心工具
+          echo "=== 核心工具版本校验 ==="
+          gcc --version || exit 1
+          make --version || exit 1
+          autoconf --version || exit 1
+        continue-on-error: false  # 步骤级配置，与 run 同级缩进
+
+      - name: Generate Makefile (configure)
+        run: ./configure
+        continue-on-error: false  # 同级缩进，语法合规
+
+      - name: Compile project
+        run: |
+          echo "=== 开始多线程编译 ==="
+          make -j$(nproc) V=1  # V=1 打印详细日志，便于排错
+        continue-on-error: false  # 关键修复：移出 run 命令块，与 run 同级
+
+      - name: Run unit tests (make check)
+        run: make check
+        continue-on-error: false
+
+      - name: Verify release package (make distcheck)
+        run: make distcheck
+        continue-on-error: false
             automake \
             libtool \
             texinfo \

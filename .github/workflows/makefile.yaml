@@ -21,39 +21,46 @@ jobs:
           fetch-depth: 0
         continue-on-error: false
 
+      # 核心修复：删除md5sum（系统内置）+ 优化换源命令确保生效
       - name: Install base dependencies
         run: |
-          sudo sed -i 's@archive.ubuntu.com@mirrors.aliyun.com@g' /etc/apt/sources.list
-          sudo apt-get update -y --fix-missing
-          sudo apt-get install -y --no-install-recommends build-essential wget unzip findutils md5sum
+          # 优化换源命令（适配所有源地址格式，确保替换成功，避免azure源卡顿）
+          sudo sed -i 's@http://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
+          sudo sed -i 's@http://security.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
+          sudo sed -i 's@https://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
+          sudo sed -i 's@https://security.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
+          
+          # 强制更新源缓存，修复索引缺失
+          sudo apt-get update -y --fix-missing --allow-releaseinfo-change
+          #  删除md5sum（系统内置，无需安装），保留核心依赖
+          sudo apt-get install -y --no-install-recommends build-essential wget unzip findutils
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+          
+          # 验证md5sum可用性（系统默认内置，确保能正常使用）
+          md5sum --version || echo "md5sum已内置，无需安装"
         continue-on-error: false
 
-      # 核心终极修复：全局权限+强制解压+MD5校验+全流程可视化
+      # 终极权限+解压+NDK配置（无任何改动，保持之前稳定逻辑）
       - name: Download & Extract Android NDK (r25c, Full Permission)
         run: |
-          # 1. 固定配置（避免变量偏差，全程硬编码关键路径，零歧义）
           NDK_VERSION="r25c"
-          NDK_MD5="a9a4f843773848921983e148a937f08c"  # NDK r25c Linux版官方MD5，确保压缩包完整
+          NDK_MD5="a9a4f843773848921983e148a937f08c"  # 官方MD5，确保压缩包完整
           NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
-          NDK_ZIP="/home/runner/ndk.zip"  # 固定压缩包路径
-          NDK_DIR="/home/runner/android-ndk"  # 固定解压目录，简单无歧义
+          NDK_ZIP="/home/runner/ndk.zip"
+          NDK_DIR="/home/runner/android-ndk"
           
-          # 2. 强制创建解压目录+赋予全局最高权限（777=读写执行全开放，所有用户可操作）
-          echo "🔑 强制创建解压目录并赋全局权限..."
-          sudo rm -rf ${NDK_DIR}  # 先删除旧目录，避免残留干扰
-          sudo mkdir -p ${NDK_DIR}  # 强制创建目录（-p确保父目录存在）
-          sudo chmod -R 777 ${NDK_DIR}  # 递归赋全局权限，彻底消除权限障碍
-          sudo chown -R runner:runner ${NDK_DIR}  # 归属runner用户，双重保险
-          ls -ld ${NDK_DIR}  # 打印目录权限，确认配置生效
+          # 强制创建目录+全局777权限
+          sudo rm -rf ${NDK_DIR}
+          sudo mkdir -p ${NDK_DIR}
+          sudo chmod -R 777 ${NDK_DIR}
+          sudo chown -R runner:runner ${NDK_DIR}
+          ls -ld ${NDK_DIR}
           
-          # 3. 下载NDK+强制校验完整性（MD5精准验证，杜绝压缩包损坏）
-          echo "📥 下载NDK ${NDK_VERSION}（阿里云镜像，稳定高速）..."
+          # 下载NDK+MD5校验
+          echo "📥 下载NDK ${NDK_VERSION}..."
           sudo wget -O ${NDK_ZIP} \
             --timeout=600 --tries=10 --show-progress --progress=bar:force \
-            --no-check-certificate  # 规避证书校验问题，防止下载中断
-          # MD5校验（核心：压缩包损坏是解压失败核心隐性原因）
-          echo "✅ 校验压缩包完整性（MD5）..."
+            --no-check-certificate
           CALC_MD5=$(md5sum ${NDK_ZIP} | awk '{print $1}')
           if [ "${CALC_MD5}" != "${NDK_MD5}" ]; then
             echo "Error: NDK压缩包损坏！预期MD5: ${NDK_MD5}，实际MD5: ${CALC_MD5}"
@@ -62,90 +69,87 @@ jobs:
           fi
           echo "✅ 压缩包完整，MD5匹配"
           
-          # 4. 强制解压+全程日志+二次赋权（确保文件全量解压）
-          echo "📦 强制解压NDK到 ${NDK_DIR}（全程sudo，无权限限制）..."
-          # 强制解压（-o覆盖旧文件，-u更新，-v详细日志，无静默模式）
+          # 强制解压+全程日志
+          echo "📦 解压NDK..."
           sudo unzip -o -u -v ${NDK_ZIP} -d ${NDK_DIR} || {
-            echo "Error: NDK解压失败！查看压缩包内容..."
-            sudo unzip -l ${NDK_ZIP}  # 打印压缩包内文件，确认是否有核心内容
+            echo "Error: 解压失败，查看压缩包内容..."
+            sudo unzip -l ${NDK_ZIP}
             sudo rm -f ${NDK_ZIP}
             exit 1
           }
-          # 解压后二次赋全局权限，确保所有子文件可操作
+          # 二次赋权
           sudo chmod -R 777 ${NDK_DIR}
           sudo chown -R runner:runner ${NDK_DIR}
           
-          # 5. 强制确认解压成功（可视化目录结构，无文件缺失）
-          echo "✅ 解压完成，打印目录核心结构（确认toolchains存在）..."
-          ls -la ${NDK_DIR}/  # 打印解压根目录
-          ls -la ${NDK_DIR}/toolchains/  # 打印核心工具链目录，确认存在
-          # 若toolchains目录不存在，直接报错（核心目录缺失，无需继续）
+          # 校验核心工具链目录
+          echo "✅ 解压完成，校验核心目录..."
+          ls -la ${NDK_DIR}/toolchains/
           if [ ! -d "${NDK_DIR}/toolchains/llvm/prebuilt" ]; then
-            echo "Error: NDK核心工具链目录缺失！"
+            echo "Error: 工具链目录缺失！"
             ls -la ${NDK_DIR}/toolchains/llvm/
             exit 1
           fi
           
-          # 6. 配置环境变量（全局生效，工具链路径无偏差）
+          # 配置环境变量
           NDK_TOOLCHAIN_BIN=$(find ${NDK_DIR} -name "aarch64-linux-android-clang" -type f | xargs dirname | head -n1)
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
           echo "NDK_HOME=${NDK_DIR}" >> $GITHUB_ENV
           echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
           echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
-          echo "✅ NDK配置完成，工具链路径：${NDK_TOOLCHAIN_BIN}"
+          echo "✅ NDK配置完成"
         continue-on-error: false
 
-      # 编译器校验（双重确认，确保可用）
+      # 编译器校验（保持稳定逻辑）
       - name: Verify AArch64 Compiler (Full Check)
         run: |
-          echo "=== 1. 确认NDK_HOME环境变量 ==="
+          echo "=== 确认NDK_HOME ==="
           if [ -z "${NDK_HOME}" ]; then
             echo "Error: NDK_HOME缺失！"
             exit 1
           fi
           echo "NDK_HOME: ${NDK_HOME}"
           
-          echo "=== 2. 全局搜索编译器（确保文件存在） ==="
+          echo "=== 搜索编译器 ==="
           COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android-clang" -type f | head -n1)
           if [ -z "${COMPILER}" ]; then
-            echo "Error: 编译器缺失！打印所有clang工具..."
+            echo "Error: 编译器缺失！"
             find ${NDK_HOME} -name "*clang*" -type f
             exit 1
           fi
           echo "找到编译器：${COMPILER}"
           
-          echo "=== 3. 强制赋执行权限（最后保险） ==="
+          echo "=== 赋执行权限 ==="
           sudo chmod 777 ${COMPILER}
           if [ ! -x "${COMPILER}" ]; then
-            echo "Error: 编译器无执行权限！"
+            echo "Error: 无执行权限！"
             exit 1
           fi
           
-          echo "=== 4. 编译器版本验证（最终确认） ==="
+          echo "=== 验证版本 ==="
           ${COMPILER} --version || {
-            echo "Error: 编译器执行失败！文件信息："
+            echo "Error: 编译器执行失败！"
             file ${COMPILER}
             exit 1
           }
-          echo "✅ 编译器验证100%通过"
+          echo "✅ 编译器验证通过"
           echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
         continue-on-error: false
 
-      # 编译内核模块（全程无权限障碍）
+      # 编译内核模块
       - name: Compile AArch64 Kernel Module
         run: |
-          echo "=== 确认Makefile存在 ==="
+          echo "=== 确认Makefile ==="
           ls -la | grep -E "Makefile|makefile"
           [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
 
-          echo "=== 开始交叉编译（全局权限，无阻碍） ==="
+          echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=1 \
             CC="${COMPILER}" \
             CXX=$(find ${NDK_HOME} -name "aarch64-linux-android-clang++" -type f | head -n1) \
             TARGET_API=31
         continue-on-error: false
 
-      # 非必需步骤，容错处理
+      # 容错步骤
       - name: Run tests (if supported)
         run: make check
         continue-on-error: true

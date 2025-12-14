@@ -21,65 +21,85 @@ jobs:
           fetch-depth: 0
         continue-on-error: false
 
+      # 步骤1：安装基础依赖（含下载解压工具+编译工具）
       - name: Install base dependencies
         run: |
           sudo sed -i 's@archive.ubuntu.com@mirrors.aliyun.com@g' /etc/apt/sources.list
           sudo apt-get update -y --fix-missing
-          sudo apt-get install -y --no-install-recommends build-essential
+          # 新增wget/unzip用于手动下载解压NDK，避免依赖Action
+          sudo apt-get install -y --no-install-recommends build-essential wget unzip
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
         continue-on-error: false
 
-      # 安装NDK（锁定r26b，Action自动注入NDK_HOME环境变量）
-      - name: Setup Android NDK (r26b)
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r26b
-          add-to-path: false  # 手动精准配置路径，避免自动配置偏差
-        continue-on-error: false
-
-      # 核心修复：动态拼接工具链路径+严格路径校验
-      - name: Configure & Verify NDK Toolchain
+      # 步骤2：手动下载+解压NDK（稳定可控，显式配置路径）
+      - name: Download & Extract Android NDK (r26b)
         run: |
-          # 1. 确认NDK_HOME已正确注入（关键前提）
-          if [ -z "${NDK_HOME}" ]; then
-            echo "Error: NDK_HOME environment variable not found!"
+          # 锁定NDK r26b（稳定版，内置aarch64工具链，适配API31）
+          NDK_VERSION="r26b"
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          NDK_INSTALL_DIR="/opt/android-ndk-${NDK_VERSION}"  # 固定安装路径，无歧义
+
+          # 1. 下载NDK（加超时重试，避免网络波动）
+          echo "📥 下载NDK ${NDK_VERSION}..."
+          wget -q --timeout=300 --tries=3 -O ndk.zip "${NDK_URL}"
+          if [ $? -ne 0 ]; then
+            echo "Error: NDK下载失败，换备用源重试..."
+            # 备用源（阿里云镜像，解决谷歌源访问慢）
+            NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
+            wget -q --timeout=300 --tries=3 -O ndk.zip "${NDK_URL}" || exit 1
+          fi
+
+          # 2. 解压NDK到固定目录
+          echo "📦 解压NDK到 ${NDK_INSTALL_DIR}..."
+          unzip -q ndk.zip -d /opt/  # 解压后自动生成 ${NDK_INSTALL_DIR}
+          if [ ! -d "${NDK_INSTALL_DIR}" ]; then
+            echo "Error: NDK解压失败，目录不存在！"
+            ls -la /opt/  # 打印/opt目录，排查解压问题
             exit 1
           fi
-          echo "✅ NDK安装路径确认：${NDK_HOME}"
 
-          # 2. 动态拼接工具链二进制目录（基于NDK_HOME，无硬编码）
+          # 3. 显式设置NDK_HOME环境变量（全局生效，后续步骤直接用）
+          echo "🔧 配置NDK_HOME环境变量..."
+          echo "NDK_HOME=${NDK_INSTALL_DIR}" >> $GITHUB_ENV
+          echo "${NDK_INSTALL_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          export NDK_HOME="${NDK_INSTALL_DIR}"  # 当前步骤即时生效
+          echo "✅ NDK配置完成，NDK_HOME=${NDK_HOME}"
+        continue-on-error: false
+
+      # 步骤3：校验工具链完整性（确保编译器可用）
+      - name: Verify NDK Toolchain
+        run: |
+          # 1. 再次确认NDK_HOME存在（双重保险）
+          if [ -z "${NDK_HOME}" ]; then
+            echo "Error: NDK_HOME未配置！"
+            exit 1
+          fi
+          echo "✅ NDK_HOME确认：${NDK_HOME}"
+
+          # 2. 确认工具链目录存在
           NDK_TOOLCHAIN_BIN="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "🔧 工具链目标路径：${NDK_TOOLCHAIN_BIN}"
-
-          # 3. 严格校验路径是否存在，避免无效访问
           if [ ! -d "${NDK_TOOLCHAIN_BIN}" ]; then
-            echo "Error: Toolchain directory not exists!"
-            # 打印NDK根目录结构，辅助排查路径偏差
-            echo -e "\n=== NDK根目录下toolchains结构 ==="
+            echo "Error: 工具链目录不存在！"
             ls -la "${NDK_HOME}/toolchains/llvm/prebuilt/"
             exit 1
           fi
-          echo "✅ 工具链目录存在"
+          echo "✅ 工具链目录确认：${NDK_TOOLCHAIN_BIN}"
 
-          # 4. 配置环境变量，确保全局可调用
-          export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
-          echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
-          echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
-
-          # 5. 验证编译器文件存在性（直观确认工具可用）
-          echo -e "\n=== 验证aarch64编译器文件 ==="
-          COMPILER_FILE="${NDK_TOOLCHAIN_BIN}/aarch64-linux-android-clang"
-          if [ -f "${COMPILER_FILE}" ] && [ -x "${COMPILER_FILE}" ]; then
-            echo "✅ 编译器存在且可执行：${COMPILER_FILE}"
-            echo "COMPILER=${COMPILER_FILE}" >> $GITHUB_ENV  # 持久化编译器路径
-          else
-            echo "Error: AArch64 compiler not found!"
-            ls -la "${NDK_TOOLCHAIN_BIN}" | grep "aarch64-linux-android"
+          # 3. 验证aarch64编译器存在且可执行
+          COMPILER="${NDK_TOOLCHAIN_BIN}/aarch64-linux-android-clang"
+          if [ ! -f "${COMPILER}" ] || [ ! -x "${COMPILER}" ]; then
+            echo "Error: aarch64编译器缺失或不可执行！"
+            ls -la "${NDK_TOOLCHAIN_BIN}" | grep "aarch64-linux-android-clang"
             exit 1
           fi
+          # 打印编译器版本，最终确认可用
+          echo -e "\n=== 编译器版本 ==="
+          ${COMPILER} --version || exit 1
+          echo "✅ 编译器验证通过"
+          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV  # 持久化编译器路径
         continue-on-error: false
 
-      # 编译安卓内核模块（直接用绝对路径编译器，零偏差）
+      # 步骤4：编译安卓内核模块（绝对路径编译器，零偏差）
       - name: Compile AArch64 Kernel Module
         run: |
           echo "=== 确认Makefile存在 ==="
@@ -87,14 +107,14 @@ jobs:
           [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
 
           echo "=== 开始交叉编译 ==="
-          # 用绝对路径编译器，彻底避免PATH配置问题，同时指定API31
+          # 用绝对路径编译器，强制指定API31，适配内核模块编译
           make -j$(nproc) V=1 \
             CC="${COMPILER}" \
-            CXX="${NDK_TOOLCHAIN_BIN}/aarch64-linux-android-clang++" \
+            CXX="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-clang++" \
             TARGET_API=31
         continue-on-error: false
 
-      # 按需保留，内核模块项目通常无需
+      # 内核模块项目无需测试/发布校验，按需保留
       - name: Run tests (if supported)
         run: make check
         continue-on-error: true

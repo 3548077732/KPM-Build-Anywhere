@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 固化稳定系统，减少包兼容问题
+    runs-on: ubuntu-22.04
     defaults:
       run:
         shell: bash
@@ -20,20 +20,53 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 核心修复：依赖安装步骤（解决找不到包裹问题）
+      # 关键修复：修正apt命令语法，解决--no-install-recommends报错，强化容错
       - name: Install build dependencies
         run: |
-          # 1. 强制更新apt源缓存（关键，避免旧缓存找不到包）
+          # 1. 换国内阿里云源（必加，避免国外源超时/包缺失，适配GitHub Runner）
+          sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
+          sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
+          # 2. 强制更新源缓存，修复缺失索引，避免包查找失败
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
-          # 2. 修复依赖冲突，清理无效包（容错）
+          # 3. 自动修复残缺依赖，清理无效包，杜绝安装阻塞
           sudo apt-get install -f -y
-          # 3. 安装核心依赖（修正语法：反斜杠后无空格，包名精简适配ubuntu22.04）
-          sudo apt-get install -y \
-          build-essential \
-          autoconf \
-          automake \
-          libtool \
-          texinfo \
+          # 4. 核心修复：--no-install-recommends移至正确位置（install后、包列表前）
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            autoconf \
+            automake \
+            libtool \
+            texinfo \
+            pkg-config
+          # 5. 清理apt缓存，释放Runner空间，避免后续步骤磁盘不足
+          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+          # 6. 校验核心工具是否安装成功，提前排查隐患
+          echo "=== 核心工具版本校验 ==="
+          gcc --version || exit 1
+          make --version || exit 1
+          autoconf --version || exit 1
+
+      # 配置生成：失败立即终止，避免无效编译
+      - name: Generate Makefile (configure)
+        run: ./configure
+        continue-on-error: false
+
+      # 编译：多线程加速，适配Runner性能，输出编译日志便于排查
+      - name: Compile project
+        run: |
+          echo "=== 开始多线程编译 ==="
+          make -j$(nproc) V=1  # V=1 打印详细编译日志，报错可快速定位
+          continue-on-error: false
+
+      # 测试：确保测试用例全过，失败明确反馈
+      - name: Run unit tests (make check)
+        run: make check
+        continue-on-error: false
+
+      # 发布包校验：标准流程，确保发布包完整性
+      - name: Verify release package (make distcheck)
+        run: make distcheck
+        continue-on-error: false
           pkg-config \
           # 可选：若项目依赖其他库，补充正确包名（例：openssl依赖 libssl-dev）
           --no-install-recommends  # 减少冗余依赖，加速安装

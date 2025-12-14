@@ -170,29 +170,24 @@ jobs:
             exit 1
           fi
 
-          # 核心修复：精准查找AArch64编译器（适配NDK r25c命名规则+全路径兜底）
+          # 精准查找AArch64编译器（适配NDK r25c命名规则+全路径兜底）
           echo -e "\n🔍 查找AArch64 clang编译器..."
-          # 步骤1：先定位llvm工具链prebuilt的bin目录（NDK r25c固定路径结构）
           LLVM_BIN_DIR=$(find ${REAL_NDK_DIR}/toolchains/llvm/prebuilt -name "bin" -type d 2>/dev/null | head -n1)
           echo "llvm工具链bin目录：${LLVM_BIN_DIR}"
           
-          # 步骤2：在bin目录找带API版本的编译器（NDK r25c命名为aarch64-linux-android<API>-clang）
           COMPILER=$(find ${LLVM_BIN_DIR} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
           
-          # 步骤3：兜底查找（全路径模糊匹配，避免bin目录定位偏差）
           if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
             echo "🔹 精准查找失败，全路径兜底搜索..."
             COMPILER=$(find ${REAL_NDK_DIR} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
           fi
           
-          # 步骤4：最终校验，找不到则打印全量clang工具，便于排查
           if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
             echo "❌ 未找到AArch64 clang编译器！打印所有clang相关工具："
             find ${REAL_NDK_DIR} -name "*clang*" -type f 2>/dev/null | head -20
             exit 1
           fi
           
-          # 配置工具链二进制目录（取编译器所在bin目录）
           NDK_TOOLCHAIN_BIN=$(dirname ${COMPILER})
           echo "✅ 找到AArch64编译器：${COMPILER}"
           echo "✅ 工具链二进制目录：${NDK_TOOLCHAIN_BIN}"
@@ -200,6 +195,8 @@ jobs:
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
           echo "NDK_HOME=${REAL_NDK_DIR}" >> $GITHUB_ENV
           echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
+          # 核心修复1：将COMPILER导出到全局环境，供后续步骤使用
+          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
           echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
           echo "✅ NDK配置完成，工具链路径：${NDK_TOOLCHAIN_BIN}"
         continue-on-error: false
@@ -217,7 +214,9 @@ jobs:
           echo "NDK_TOOLCHAIN_BIN: ${NDK_TOOLCHAIN_BIN}"
 
           echo "=== 确认编译器 ==="
-          if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
+          # 核心修复2：用${变量:-}容错，避免未定义时触发set -u报错，再兜底查找
+          if [ -z "${COMPILER:-}" ] || [ ! -f "${COMPILER:-}" ]; then
+            echo "🔹 编译器变量未定义/无效，兜底搜索..."
             COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
             if [ -z "${COMPILER}" ]; then
               echo "Error: 编译器缺失！"

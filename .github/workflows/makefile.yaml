@@ -19,6 +19,15 @@ on:
         options:
           - production
           - test
+      # 新增：容错开关，若确认无需kpmodule.h，可手动选择跳过校验（默认不跳过，保证严谨）
+      skip_kpmodule_check:
+        description: '是否跳过kpmodule.h头文件校验（仅当确认无需该文件时选择"是"）'
+        required: true
+        default: '否'
+        type: choice
+        options:
+          - 是
+          - 否
 
 jobs:
   build:
@@ -317,27 +326,45 @@ jobs:
             fi
           done
 
-          # 3. 动态搜索自定义头文件 kpmodule.h（适配任何存放位置，彻底杜绝缺失）
+          # 核心优化：柔性校验kpmodule.h，给出3种精准解决方法，避免盲目终止
+          echo -e "\n🔍 搜索自定义头文件 kpmodule.h..."
           KP_MODULE_PATH=$(find ${PROJECT_ROOT} -name "kpmodule.h" -type f 2>/dev/null | head -n1)
           if [ -z "${KP_MODULE_PATH}" ]; then
-            echo "❌ 自定义头文件 kpmodule.h 未在项目内找到！请确认文件已上传至仓库，或检查文件名拼写（区分大小写）"
+            echo -e "\n⚠️  未找到自定义头文件 kpmodule.h，需手动处理以下3种情况之一："
+            echo "  1. 若需要该文件：将 kpmodule.h 上传至代码仓库（任意目录均可，配置会自动识别）；"
+            echo "  2. 若文件名写错：修正文件名（区分大小写，如 KPModule.h ≠ kpmodule.h）；"
+            echo "  3. 若无需该文件：删除 hello.c 中 '#include <kpmodule.h>' 这一行多余引用；"
+            echo -e "\n❌ 请处理后重新提交，当前流程终止（手动触发时可选择跳过该校验）"
             exit 1
           fi
-          # 提取 kpmodule.h 所在目录，添加到搜索路径
+          # 找到文件则正常添加路径
           KP_MODULE_DIR=$(dirname ${KP_MODULE_PATH})
           CUSTOM_HEADER_PATHS="-I${KP_MODULE_DIR}"
           echo "✅ 找到自定义头文件 kpmodule.h，路径：${KP_MODULE_PATH}，搜索路径：${KP_MODULE_DIR}"
 
-          # 4. 收集项目内所有include目录（批量添加，适配多目录存放）
+          # 3. 收集项目内所有include目录（批量添加，适配多目录存放）
           PROJECT_INCLUDE_DIRS=$(find ${PROJECT_ROOT} -name "include" -type d 2>/dev/null | tr '\n' ' ')
           for DIR in ${PROJECT_INCLUDE_DIRS}; do
             CUSTOM_HEADER_PATHS="${CUSTOM_HEADER_PATHS} -I${DIR}"
           done
           echo "✅ 项目内所有include目录：${PROJECT_INCLUDE_DIRS}"
 
-          # 5. 拼接全量头文件搜索路径，导出为环境变量供编译使用
+          # 4. 拼接全量头文件搜索路径，导出为环境变量供编译使用
           FULL_CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/include/uapi -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm -I${KERNEL_DIR}/arch/arm64/include/uapi -I${KERNEL_DIR}/include/asm-generic -I${PROJECT_ROOT} ${CUSTOM_HEADER_PATHS}"
           echo "✅ 全量头文件搜索路径：${FULL_CFLAGS}"
+          echo "FULL_CFLAGS=${FULL_CFLAGS}" >> $GITHUB_ENV
+        continue-on-error: false
+
+      # 新增：手动触发时的容错步骤，跳过kpmodule.h校验（自动触发不生效）
+      - name: Skip kpmodule.h Check (Manual Trigger Only)
+        if: github.event.inputs.skip_kpmodule_check == '是'
+        run: |
+          set -euo pipefail; set -x
+          KERNEL_DIR=${KERNEL_DIR}
+          PROJECT_ROOT=${PWD}
+          # 拼接不含kpmodule.h的全量路径（假设无需该文件，已删除代码引用）
+          FULL_CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/include/uapi -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm -I${KERNEL_DIR}/arch/arm64/include/uapi -I${KERNEL_DIR}/include/asm-generic -I${PROJECT_ROOT}"
+          echo "⚠️  已手动选择跳过kpmodule.h校验，若编译失败请确认已删除代码中该文件的引用"
           echo "FULL_CFLAGS=${FULL_CFLAGS}" >> $GITHUB_ENV
         continue-on-error: false
 
@@ -350,7 +377,7 @@ jobs:
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
-          # 核心优化：使用预先生成的全量头文件路径，强制传递给编译器，确保Makefile继承
+          # 使用预先生成的全量头文件路径，强制传递给编译器
           PROJECT_ROOT=${PWD}
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \
@@ -363,10 +390,8 @@ jobs:
             KERNELDIR="${KERNEL_DIR}" \
             ARCH=arm64 \
             CFLAGS="${FULL_CFLAGS}" \
-            # 强制覆盖Makefile内CFLAGS，确保路径生效
             EXTRA_CFLAGS="${FULL_CFLAGS}" || {
             echo "Error: 编译失败！"
-            # 编译失败时打印所有头文件搜索路径，辅助排查
             echo "当前生效的头文件搜索路径：${FULL_CFLAGS}"
             exit 1
           }

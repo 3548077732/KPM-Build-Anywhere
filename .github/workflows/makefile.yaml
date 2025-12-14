@@ -29,69 +29,72 @@ jobs:
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
         continue-on-error: false
 
-      # 步骤1：安装NDK（锁定r26b，稳定兼容）
+      # 安装NDK（锁定r26b，Action自动注入NDK_HOME环境变量）
       - name: Setup Android NDK (r26b)
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26b
-          add-to-path: false  # 禁用自动加路径，手动精准配置避免偏差
+          add-to-path: false  # 手动精准配置路径，避免自动配置偏差
         continue-on-error: false
 
-      # 步骤2：精准配置NDK工具链路径（核心修复，确保编译器能被找到）
-      - name: Configure NDK Toolchain Path
+      # 核心修复：动态拼接工具链路径+严格路径校验
+      - name: Configure & Verify NDK Toolchain
         run: |
-          # 自动获取NDK安装路径（Action已注入NDK_HOME环境变量）
-          echo "NDK安装路径：${NDK_HOME}"
-          # 拼接工具链二进制目录（clang编译器所在核心路径）
+          # 1. 确认NDK_HOME已正确注入（关键前提）
+          if [ -z "${NDK_HOME}" ]; then
+            echo "Error: NDK_HOME environment variable not found!"
+            exit 1
+          fi
+          echo "✅ NDK安装路径确认：${NDK_HOME}"
+
+          # 2. 动态拼接工具链二进制目录（基于NDK_HOME，无硬编码）
           NDK_TOOLCHAIN_BIN="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          # 强制加入系统PATH，当前步骤即时生效
+          echo "🔧 工具链目标路径：${NDK_TOOLCHAIN_BIN}"
+
+          # 3. 严格校验路径是否存在，避免无效访问
+          if [ ! -d "${NDK_TOOLCHAIN_BIN}" ]; then
+            echo "Error: Toolchain directory not exists!"
+            # 打印NDK根目录结构，辅助排查路径偏差
+            echo -e "\n=== NDK根目录下toolchains结构 ==="
+            ls -la "${NDK_HOME}/toolchains/llvm/prebuilt/"
+            exit 1
+          fi
+          echo "✅ 工具链目录存在"
+
+          # 4. 配置环境变量，确保全局可调用
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
-          echo "工具链路径：${NDK_TOOLCHAIN_BIN}"
-          # 持久化到全局环境，后续步骤可用
           echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
           echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
-          
-          # 验证路径是否正确：列出目录下aarch64架构编译器，直观确认文件存在
-          echo -e "\n=== 工具链目录下aarch64相关编译器列表 ==="
-          ls -la ${NDK_TOOLCHAIN_BIN} | grep "aarch64-linux-android" | grep clang
-        continue-on-error: false
 
-      # 步骤3：验证编译器可用性（适配两种命名格式，无遗漏）
-      - name: Verify Cross-Compiler
-        run: |
-          # 优先尝试带API31后缀的命名；若不存在，用通用命名+--target指定API
-          if command -v aarch64-linux-android31-clang &> /dev/null; then
-            COMPILER="aarch64-linux-android31-clang"
+          # 5. 验证编译器文件存在性（直观确认工具可用）
+          echo -e "\n=== 验证aarch64编译器文件 ==="
+          COMPILER_FILE="${NDK_TOOLCHAIN_BIN}/aarch64-linux-android-clang"
+          if [ -f "${COMPILER_FILE}" ] && [ -x "${COMPILER_FILE}" ]; then
+            echo "✅ 编译器存在且可执行：${COMPILER_FILE}"
+            echo "COMPILER=${COMPILER_FILE}" >> $GITHUB_ENV  # 持久化编译器路径
           else
-            COMPILER="aarch64-linux-android-clang"  # NDK通用编译器命名
-          fi
-          echo "最终使用编译器：${COMPILER}"
-          # 验证编译器版本，确保可用
-          ${COMPILER} --version || {
-            echo "编译器验证失败，检查工具链目录文件！"
-            ls -la ${NDK_TOOLCHAIN_BIN} | grep "aarch64-linux-android-clang"
+            echo "Error: AArch64 compiler not found!"
+            ls -la "${NDK_TOOLCHAIN_BIN}" | grep "aarch64-linux-android"
             exit 1
-          }
-          # 持久化编译器名称，后续编译复用
-          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
+          fi
         continue-on-error: false
 
-      # 步骤4：编译安卓内核模块（精准传参，适配内核模块编译需求）
+      # 编译安卓内核模块（直接用绝对路径编译器，零偏差）
       - name: Compile AArch64 Kernel Module
         run: |
           echo "=== 确认Makefile存在 ==="
           ls -la | grep -E "Makefile|makefile"
           [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
-          
-          echo "=== 开始交叉编译（AArch64架构） ==="
-          # 显式传编译器+API级别参数，覆盖Makefile可能的配置偏差
+
+          echo "=== 开始交叉编译 ==="
+          # 用绝对路径编译器，彻底避免PATH配置问题，同时指定API31
           make -j$(nproc) V=1 \
-            CC=${COMPILER} \
-            CXX=aarch64-linux-android-clang++ \
-            TARGET_API=31  # 强制指定目标API级别，适配项目需求
+            CC="${COMPILER}" \
+            CXX="${NDK_TOOLCHAIN_BIN}/aarch64-linux-android-clang++" \
+            TARGET_API=31
         continue-on-error: false
 
-      # 内核模块项目通常无测试/发布校验，按需保留
+      # 按需保留，内核模块项目通常无需
       - name: Run tests (if supported)
         run: make check
         continue-on-error: true

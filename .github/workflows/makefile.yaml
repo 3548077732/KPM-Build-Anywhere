@@ -144,22 +144,13 @@ jobs:
           echo "✅ 解压成功，共解压出 ${unzip_file_count} 个文件"
 
           echo -e "\n🔍 动态查找真实NDK根目录..."
-          # 核心修复1：正确定位根目录（find找到prebuilt后，仅执行1次dirname，而非2次）
-          REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -type d -path "*/toolchains/llvm/prebuilt" 2>/dev/null | head -n1)
-          if [ -n "${REAL_NDK_DIR}" ]; then
-            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))  # 原错误：多1次dirname，已修正？不，重新算：假设prebuilt路径是 A/toolchains/llvm/prebuilt，dirname1次是A/toolchains/llvm，再dirname1次是A/toolchains？不对！正确NDK根目录是A，所以find路径应该调整，或者dirname次数修正。哦，正确逻辑：find找含toolchains的一级子目录，直接定位根目录！
-            # 重新优化根目录查找（彻底避免路径重复，最直观可靠）
-            REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 2 -type d -exec test -d "{}/toolchains/llvm/prebuilt" \; -print | head -n1)
-          fi
-          # 核心修复2：兜底查找优化（直接找含toolchains/llvm/prebuilt的目录，无需多步dirname）
+          REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 2 -type d -exec test -d "{}/toolchains/llvm/prebuilt" \; -print | head -n1)
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
             REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -type d -exec test -d "{}/toolchains/llvm/prebuilt" \; -print | head -n1)
           fi
-          # 最终兜底：若仍未找到，直接取解压目录下的唯一子目录（NDK默认解压结构）
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
             REAL_NDK_DIR=$(ls -d ${NDK_UNZIP_DIR}/*/ 2>/dev/null | head -n1)
           fi
-          # 最终校验
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
             echo "❌ 未找到真实NDK根目录，打印全量解压目录结构："
             find ${NDK_UNZIP_DIR} -type d | head -30
@@ -172,7 +163,6 @@ jobs:
           sudo chown -R runner:runner ${REAL_NDK_DIR}
 
           echo -e "\n✅ 校验工具链目录..."
-          # 校验路径基于正确根目录，无重复
           ls -la ${REAL_NDK_DIR}/toolchains/
           if [ ! -d "${REAL_NDK_DIR}/toolchains/llvm/prebuilt" ]; then
             echo "❌ 工具链核心目录缺失！打印llvm目录内容："
@@ -180,15 +170,33 @@ jobs:
             exit 1
           fi
 
-          NDK_TOOLCHAIN_BIN=$(find ${REAL_NDK_DIR} -name "aarch64-linux-android-clang" -type f 2>/dev/null | head -n1)
-          if [ -n "${NDK_TOOLCHAIN_BIN}" ]; then
-            NDK_TOOLCHAIN_BIN=$(dirname ${NDK_TOOLCHAIN_BIN})
+          # 核心修复：精准查找AArch64编译器（适配NDK r25c命名规则+全路径兜底）
+          echo -e "\n🔍 查找AArch64 clang编译器..."
+          # 步骤1：先定位llvm工具链prebuilt的bin目录（NDK r25c固定路径结构）
+          LLVM_BIN_DIR=$(find ${REAL_NDK_DIR}/toolchains/llvm/prebuilt -name "bin" -type d 2>/dev/null | head -n1)
+          echo "llvm工具链bin目录：${LLVM_BIN_DIR}"
+          
+          # 步骤2：在bin目录找带API版本的编译器（NDK r25c命名为aarch64-linux-android<API>-clang）
+          COMPILER=$(find ${LLVM_BIN_DIR} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
+          
+          # 步骤3：兜底查找（全路径模糊匹配，避免bin目录定位偏差）
+          if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
+            echo "🔹 精准查找失败，全路径兜底搜索..."
+            COMPILER=$(find ${REAL_NDK_DIR} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
           fi
-          if [ -z "${NDK_TOOLCHAIN_BIN}" ] || [ ! -d "${NDK_TOOLCHAIN_BIN}" ]; then
-            echo "❌ 未找到工具链二进制目录！搜索所有clang工具："
-            find ${REAL_NDK_DIR} -name "*aarch64-linux-android-clang*" -type f 2>/dev/null
+          
+          # 步骤4：最终校验，找不到则打印全量clang工具，便于排查
+          if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
+            echo "❌ 未找到AArch64 clang编译器！打印所有clang相关工具："
+            find ${REAL_NDK_DIR} -name "*clang*" -type f 2>/dev/null | head -20
             exit 1
           fi
+          
+          # 配置工具链二进制目录（取编译器所在bin目录）
+          NDK_TOOLCHAIN_BIN=$(dirname ${COMPILER})
+          echo "✅ 找到AArch64编译器：${COMPILER}"
+          echo "✅ 工具链二进制目录：${NDK_TOOLCHAIN_BIN}"
+
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
           echo "NDK_HOME=${REAL_NDK_DIR}" >> $GITHUB_ENV
           echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
@@ -208,12 +216,13 @@ jobs:
           echo "NDK_HOME: ${NDK_HOME}"
           echo "NDK_TOOLCHAIN_BIN: ${NDK_TOOLCHAIN_BIN}"
 
-          echo "=== 搜索编译器 ==="
-          COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android-clang" -type f 2>/dev/null | head -n1)
-          if [ -z "${COMPILER}" ]; then
-            echo "Error: 编译器缺失！搜索结果："
-            find ${NDK_HOME} -name "*aarch64-linux-android-clang*" -type f 2>/dev/null
-            exit 1
+          echo "=== 确认编译器 ==="
+          if [ -z "${COMPILER}" ] || [ ! -f "${COMPILER}" ]; then
+            COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
+            if [ -z "${COMPILER}" ]; then
+              echo "Error: 编译器缺失！"
+              exit 1
+            fi
           fi
           echo "找到编译器：${COMPILER}"
 
@@ -255,7 +264,7 @@ jobs:
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \
             CC="${COMPILER}" \
-            CXX=$(find ${NDK_HOME} -name "aarch64-linux-android-clang++" -type f 2>/dev/null | head -n1) \
+            CXX=$(find ${NDK_HOME} -name "aarch64-linux-android*-clang++" -type f 2>/dev/null | head -n1) \
             TARGET_ARCH=aarch64 \
             TARGET_API=31 \
             NDK="${NDK_HOME}" \

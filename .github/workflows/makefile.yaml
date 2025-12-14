@@ -25,10 +25,9 @@ jobs:
     runs-on: ubuntu-22.04
     defaults:
       run:
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        # 新增：shell执行错误立即捕获，打印详细信息
+        # 核心修正：合并shell配置，删除重复定义，同时保留错误捕获+工作目录
         shell: bash -euo pipefail -c 'set -x; $0'
+        working-directory: ${{ github.workspace }}
 
     steps:
       - name: Checkout source code
@@ -127,10 +126,9 @@ jobs:
           ls -la ${NDK_UNZIP_DIR}/
 
           echo -e "\n🔍 动态查找真实NDK根目录..."
-          # 优化find：限制深度+容错，无结果时不报错
           REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 3 -type d -path "*/toolchains/llvm/prebuilt" 2>/dev/null | head -n1)
           if [ -n "${REAL_NDK_DIR}" ]; then
-            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))  # 向上两级找根目录
+            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))
           fi
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
             echo "❌ 未找到真实NDK根目录，搜索关键目录："
@@ -151,7 +149,6 @@ jobs:
             exit 1
           fi
 
-          # 优化工具链路径搜索：容错+显式路径
           NDK_TOOLCHAIN_BIN=$(find ${REAL_NDK_DIR} -name "aarch64-linux-android-clang" -type f 2>/dev/null | head -n1)
           if [ -n "${NDK_TOOLCHAIN_BIN}" ]; then
             NDK_TOOLCHAIN_BIN=$(dirname ${NDK_TOOLCHAIN_BIN})
@@ -189,7 +186,6 @@ jobs:
           echo "找到编译器：${COMPILER}"
 
           echo "=== 校验编译器完整性 ==="
-          # 确认是可执行二进制文件，避免解压损坏
           if [ ! -x "${COMPILER}" ]; then
             echo "编译器无执行权限，赋权..."
             sudo chmod 777 ${COMPILER}
@@ -199,7 +195,6 @@ jobs:
               exit 1
             fi
           fi
-          # 检查文件类型是否为二进制
           file ${COMPILER} | grep -q "ELF 64-bit" || {
             echo "Error: 编译器非有效二进制文件！文件信息："
             file ${COMPILER}
@@ -209,7 +204,7 @@ jobs:
           echo "=== 验证编译器版本 ==="
           ${COMPILER} --version || {
             echo "Error: 编译器执行失败！"
-            ldd ${COMPILER}  # 检查编译器依赖库是否缺失
+            ldd ${COMPILER}
             exit 1
           }
           echo "✅ 编译器验证通过"
@@ -221,12 +216,10 @@ jobs:
           echo "=== 确认Makefile ==="
           ls -la | grep -E "Makefile|makefile"
           [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
-          # 打印Makefile前50行，确认核心编译参数（便于排查硬编码）
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
           echo "=== 开始交叉编译 ==="
-          # 显式传递全量关键参数，覆盖Makefile硬编码，适配内核模块编译
           make -j$(nproc) V=2 \
             CC="${COMPILER}" \
             CXX=$(find ${NDK_HOME} -name "aarch64-linux-android-clang++" -type f 2>/dev/null | head -n1) \

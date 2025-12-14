@@ -48,50 +48,12 @@ jobs:
           md5sum --version || echo "md5sum已内置，无需安装"
         continue-on-error: false
 
-      # 核心新增步骤1：编译前校验关键头文件是否存在（提前排查缺失，杜绝编译中断）
-      - name: Check Critical Header Files Existence
-        run: |
-          set -euo pipefail; set -x
-          # 定义需要校验的头文件（含路径，覆盖内核默认+自定义/第三方）
-          declare -a REQUIRED_HEADERS=(
-            # 内核默认核心头文件
-            "${{ github.workspace }}/hello.c"  # 自身源码文件（确保检出正常）
-            "/home/runner/android-kernel-source/include/linux/compiler.h"
-            "/home/runner/android-kernel-source/arch/arm64/include/asm/rwonce.h"
-            # 自定义/第三方头文件（重点校验kpmodule.h，适配2种常见存放位置）
-            "${{ github.workspace }}/kpmodule.h"  # 项目根目录
-            "${{ github.workspace }}/include/kpmodule.h"  # 项目include子目录
-          )
-
-          # 遍历校验，缺失则报错并提示解决方案
-          for HEADER in "${REQUIRED_HEADERS[@]}"; do
-            if [ ! -f "${HEADER}" ]; then
-              # 特殊处理kpmodule.h（自定义头文件，给出具体排查方向）
-              if [[ "${HEADER}" == *"kpmodule.h"* ]]; then
-                echo "❌ 自定义/第三方头文件 ${HEADER} 缺失！请确认："
-                echo "1. kpmodule.h 是否已放入项目根目录或 include 子目录；"
-                echo "2. 若为第三方依赖头文件，是否已下载对应依赖包并放置正确路径；"
-                echo "3. 头文件名是否拼写正确（区分大小写）。"
-                # 搜索项目内所有kpmodule相关文件，辅助排查
-                echo "🔍 项目内搜索kpmodule相关文件："
-                find ${PWD} -name "*kpmodule*" -type f 2>/dev/null || echo "无匹配文件"
-                exit 1
-              else
-                # 内核头文件缺失，提示重新下载内核源码
-                echo "❌ 内核头文件 ${HEADER} 缺失！请重新执行内核源码下载步骤。"
-                exit 1
-              fi
-            fi
-          done
-          echo "✅ 所有关键头文件均存在，编译前校验通过"
-        continue-on-error: false
-
       - name: Download Android Kernel Source (aarch64, API 31)
         run: |
           set -euo pipefail; set -x
           KERNEL_VERSION="android12-5.10"
           KERNEL_DIR="/home/runner/android-kernel-source"
-          KERNEL_REPO="https://android.googlesource.com/kernel/common"
+          KERNEL_REPO="https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/common.git"
 
           sudo rm -rf ${KERNEL_DIR}
           sudo mkdir -p ${KERNEL_DIR}
@@ -324,6 +286,50 @@ jobs:
           echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
         continue-on-error: false
 
+      # 核心调整：将头文件校验步骤移到「内核+NDK下载配置完成后，编译前」，确保所有依赖文件已存在
+      - name: Check Critical Header Files Existence
+        run: |
+          set -euo pipefail; set -x
+          # 优化：用全局环境变量引用内核目录，避免硬编码错误
+          KERNEL_DIR=${KERNEL_DIR}
+          PROJECT_ROOT=${PWD}
+          # 定义需要校验的头文件（含路径，覆盖内核默认+自定义/第三方）
+          declare -a REQUIRED_HEADERS=(
+            # 自身源码文件（确保检出正常）
+            "${PROJECT_ROOT}/hello.c"
+            # 内核默认核心头文件（依赖内核源码下载完成）
+            "${KERNEL_DIR}/include/linux/compiler.h"
+            "${KERNEL_DIR}/arch/arm64/include/asm/rwonce.h"
+            # 自定义/第三方头文件（重点校验kpmodule.h，适配2种常见存放位置）
+            "${PROJECT_ROOT}/kpmodule.h"
+            "${PROJECT_ROOT}/include/kpmodule.h"
+          )
+
+          # 遍历校验，缺失则报错并提示解决方案
+          for HEADER in "${REQUIRED_HEADERS[@]}"; do
+            if [ ! -f "${HEADER}" ]; then
+              # 特殊处理kpmodule.h（自定义头文件，给出具体排查方向）
+              if [[ "${HEADER}" == *"kpmodule.h"* ]]; then
+                echo "❌ 自定义/第三方头文件 ${HEADER} 缺失！请确认："
+                echo "1. kpmodule.h 是否已放入项目根目录或 include 子目录；"
+                echo "2. 若为第三方依赖头文件，是否已下载对应依赖包并放置正确路径；"
+                echo "3. 头文件名是否拼写正确（区分大小写）。"
+                # 搜索项目内所有kpmodule相关文件，辅助排查
+                echo "🔍 项目内搜索kpmodule相关文件："
+                find ${PROJECT_ROOT} -name "*kpmodule*" -type f 2>/dev/null || echo "无匹配文件"
+                exit 1
+              else
+                # 内核头文件缺失，提示重新下载内核源码
+                echo "❌ 内核头文件 ${HEADER} 缺失！内核源码下载异常，请重新执行流程。"
+                # 搜索内核目录内相关文件，辅助排查
+                find ${KERNEL_DIR} -name "$(basename ${HEADER})" -type f 2>/dev/null || echo "内核目录内无该文件"
+                exit 1
+              fi
+            fi
+          done
+          echo "✅ 所有关键头文件均存在，编译前校验通过"
+        continue-on-error: false
+
       - name: Compile AArch64 Kernel Module
         run: |
           set -euo pipefail; set -x
@@ -333,7 +339,7 @@ jobs:
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
-          # 核心修复1：补全所有可能的头文件搜索路径（覆盖内核+项目自定义/第三方，杜绝后续缺失）
+          # 补全所有可能的头文件搜索路径（覆盖内核+项目自定义/第三方，杜绝后续缺失）
           PROJECT_ROOT=${PWD}
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \

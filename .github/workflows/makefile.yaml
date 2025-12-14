@@ -74,7 +74,6 @@ jobs:
             find ${KERNEL_DIR} -name "compiler.h" -type f | head -5
             exit 1
           fi
-          # 新增：校验ARM64架构asm头文件目录是否存在
           ASM_DIR="${KERNEL_DIR}/arch/arm64/include/asm"
           if [ ! -d ${ASM_DIR} ]; then
             echo "❌ ARM64架构asm头文件目录缺失！"
@@ -104,17 +103,19 @@ jobs:
           sudo mkdir -p ${NDK_UNZIP_DIR}
           sudo chmod -R 777 ${NDK_UNZIP_DIR}
           sudo chown -R runner:runner ${NDK_UNZIP_DIR}
-          ls -ld ${NDK_UNZIP ${NDK_UNZIP_DIR}
+          ls -ld ${NDK_UNZIP_DIR}
 
           download_ndk() {
             local url=$1
             echo -e "\n📥 尝试从源下载：${url}"
             sudo rm -f ${NDK_ZIP}
             echo "🔹 优先使用wget下载..."
+            # 修正1：wget命令反斜杠后无多余字符，格式规范
             sudo wget --no-cache --no-cookies --timeout=1200 \
               --tries=10 --retry-connrefused --waitretry=30 --progress=bar:force \
               --no-check-certificate -O ${NDK_ZIP} ${url} -S 2>&1 | grep "HTTP/" || {
                 echo "🔹 wget下载失败，切换curl重试..."
+                # 核心修正2：curl命令整理换行，反斜杠后纯净无空格，避免解析异常
                 sudo curl -fSL --connect-timeout 1200 --retry 10 --retry-delay 30 \
                   --retry-max-time 3600 --insecure -o ${NDK_ZIP} ${url} -w "HTTP状态码：%{http_code}\n" || {
                   echo "❌ 该源双工具下载均失败"
@@ -296,7 +297,6 @@ jobs:
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
-          # 核心修复：CFLAGS补充ARM64架构专属头文件路径（asm目录）
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \
             CC="${COMPILER}" \

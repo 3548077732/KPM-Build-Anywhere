@@ -1,10 +1,26 @@
 name: Android Kernel Module CI
 
+# 核心新增：手动触发（workflow_dispatch）+ 保留原有自动触发
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:  # 手动触发核心配置，添加后可在GitHub Actions页面手动启动
+    inputs:
+      # 可选：添加手动触发时的自定义参数（按需配置，不填也可纯手动触发）
+      build_desc:
+        description: '构建描述（可选）'
+        required: false
+        default: '手动触发内核模块构建'
+      build_env:
+        description: '构建环境'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - test
 
 jobs:
   build:
@@ -21,7 +37,6 @@ jobs:
           fetch-depth: 0
         continue-on-error: false
 
-      # 稳定依赖安装（无改动，已验证生效）
       - name: Install base dependencies
         run: |
           sudo sed -i 's@http://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
@@ -34,20 +49,16 @@ jobs:
           md5sum --version || echo "md5sum已内置，无需安装"
         continue-on-error: false
 
-      # 核心精准修复：修正NDK体积阈值（官方实际体积约520MB，阈值设450MB容错）
       - name: Download & Extract Android NDK (r25c, Full Integrity)
         run: |
-          # 1. 官方精准配置（标注实际体积，避免阈值误判）
           NDK_VERSION="r25c"
-          OFFICIAL_NDK_MD5="a9a4f843773848921983e148a937f08c"  # 安卓官网权威MD5
-          # NDK r25c Linux x86_64版官方实际体积约520MB，阈值设450MB（留70MB冗余，杜绝误判）
-          MIN_NDK_SIZE=$((450 * 1024 * 1024))  
+          OFFICIAL_NDK_MD5="a9a4f843773848921983e148a937f08c"
+          MIN_NDK_SIZE=$((450 * 1024 * 1024))
           ALIYUN_NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
           OFFICIAL_NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
           NDK_ZIP="/home/runner/ndk.zip"
           NDK_DIR="/home/runner/android-ndk"
           
-          # 2. 前置清理（无改动，杜绝残留）
           echo "🔧 清理旧NDK文件，确保全新下载..."
           sudo rm -rf ${NDK_ZIP} ${NDK_DIR}
           sudo mkdir -p ${NDK_DIR}
@@ -55,7 +66,6 @@ jobs:
           sudo chown -R runner:runner ${NDK_DIR}
           ls -ld ${NDK_DIR}
           
-          # 3. 双源下载+精准校验（仅改体积阈值，其他逻辑不变）
           download_ndk() {
             local url=$1
             echo -e "\n📥 从源下载NDK：${url}"
@@ -66,7 +76,6 @@ jobs:
                 return 1
               }
             
-            # 体积校验（核心修复：阈值从1GB改为450MB，匹配官方实际体积）
             local zip_size=$(du -b ${NDK_ZIP} | awk '{print $1}')
             echo "📏 压缩包实际体积：${zip_size}字节（约$(echo "scale=2; ${zip_size}/1024/1024" | bc)MB），最小阈值：$(echo "scale=2; ${MIN_NDK_SIZE}/1024/1024" | bc)MB"
             if [ ${zip_size} -lt ${MIN_NDK_SIZE} ]; then
@@ -75,7 +84,6 @@ jobs:
               return 1
             fi
             
-            # MD5校验（无改动，官方标准）
             local calc_md5=$(md5sum ${NDK_ZIP} | awk '{print $1}')
             if [ "${calc_md5}" != "${OFFICIAL_NDK_MD5}" ]; then
               echo "❌ MD5不匹配（预期：${OFFICIAL_NDK_MD5}，实际：${calc_md5}），包损坏"
@@ -87,7 +95,6 @@ jobs:
             return 0
           }
           
-          # 双源重试（无改动，稳定兜底）
           if download_ndk ${ALIYUN_NDK_URL}; then
             echo "✅ 优先源（阿里云）下载成功"
           elif download_ndk ${OFFICIAL_NDK_URL}; then
@@ -97,7 +104,6 @@ jobs:
             exit 1
           fi
           
-          # 4. 解压+赋权（无改动，稳定执行）
           echo -e "\n📦 解压NDK到 ${NDK_DIR}..."
           sudo unzip -o -u -v ${NDK_ZIP} -d ${NDK_DIR} || {
             echo "❌ 解压失败，查看压缩包内容..."
@@ -108,7 +114,6 @@ jobs:
           sudo chmod -R 777 ${NDK_DIR}
           sudo chown -R runner:runner ${NDK_DIR}
           
-          # 5. 核心目录校验（无改动，稳定校验）
           echo -e "\n✅ 解压完成，校验核心工具链目录..."
           ls -la ${NDK_DIR}/toolchains/
           if [ ! -d "${NDK_DIR}/toolchains/llvm/prebuilt" ]; then
@@ -117,7 +122,6 @@ jobs:
             exit 1
           fi
           
-          # 6. 环境变量配置（无改动，稳定生效）
           NDK_TOOLCHAIN_BIN=$(find ${NDK_DIR} -name "aarch64-linux-android-clang" -type f | xargs dirname | head -n1)
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
           echo "NDK_HOME=${NDK_DIR}" >> $GITHUB_ENV
@@ -126,7 +130,6 @@ jobs:
           echo "✅ NDK配置完成，工具链路径：${NDK_TOOLCHAIN_BIN}"
         continue-on-error: false
 
-      # 编译器校验（无改动，稳定校验）
       - name: Verify AArch64 Compiler (Full Check)
         run: |
           echo "=== 确认NDK_HOME ==="
@@ -162,7 +165,6 @@ jobs:
           echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
         continue-on-error: false
 
-      # 编译内核模块（无改动，稳定执行）
       - name: Compile AArch64 Kernel Module
         run: |
           echo "=== 确认Makefile ==="
@@ -176,7 +178,6 @@ jobs:
             TARGET_API=31
         continue-on-error: false
 
-      # 容错步骤（无改动，稳定容错）
       - name: Run tests (if supported)
         run: make check
         continue-on-error: true

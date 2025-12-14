@@ -55,9 +55,9 @@ jobs:
           CORRECT_NDK_MD5="7845ab5be16149828ebac818a087d4ab"  # 双源一致的正确MD5
           MIN_NDK_SIZE=$((450 * 1024 * 1024))  # 匹配实际体积的阈值
           # 3源兜底：阿里云（优先）+ 谷歌官方（备用1）+ 华为镜像（备用2，国内超稳）
-          ALIYUN_NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux-x86_64.zip"
-          GOOGLE_NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux-x86_64.zip"
-          HUAWEI_NDK_URL="https://mirrors.huaweicloud.com/android-ndk/android-ndk-${NDK_VERSION}-linux-x86_64.zip"
+          ALIYUN_NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
+          GOOGLE_NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          HUAWEI_NDK_URL="https://mirrors.huaweicloud.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
           NDK_ZIP="/home/runner/ndk.zip"
           NDK_DIR="/home/runner/android-ndk"
           

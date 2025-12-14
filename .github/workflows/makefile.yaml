@@ -101,12 +101,11 @@ jobs:
               sudo rm -f ${NDK_ZIP}
               return 1
             fi
-            # 新增：下载成功后，先校验压缩包内是否有内容（避免空包/假完整）
             echo "🔍 校验压缩包内结构（前20个文件）..."
             local zip_file_count=$(sudo unzip -l ${NDK_ZIP} | wc -l)
-            if [ ${zip_file_count} -lt 10 ]; then  # 正常压缩包至少含多个目录文件，小于10则异常
+            if [ ${zip_file_count} -lt 10 ]; then
               echo "❌ 压缩包内无有效内容，判定损坏"
-              sudo unzip -l ${NDK_ZIP}  # 打印完整内容，便于排查
+              sudo unzip -l ${NDK_ZIP}
               sudo rm -f ${NDK_ZIP}
               return 1
             fi
@@ -126,20 +125,18 @@ jobs:
           fi
 
           echo -e "\n📦 解压NDK到 ${NDK_UNZIP_DIR}..."
-          # 核心优化：简化unzip参数（去掉冗余-u，保留-o强制覆盖+q静默提速，避免参数干扰）
           sudo unzip -o -q ${NDK_ZIP} -d ${NDK_UNZIP_DIR} || {
             echo "❌ 解压失败，查看压缩包内容..."
             sudo unzip -l ${NDK_ZIP} | head -30
             sudo rm -f ${NDK_ZIP}
             exit 1
           }
-          # 新增：解压后强制检查是否有有效文件（排除仅.和..的空目录）
           echo -e "\n📂 解压后目标目录内容（含子目录）："
           ls -la ${NDK_UNZIP_DIR}/
-          local unzip_file_count=$(find ${NDK_UNZIP_DIR} -type f | wc -l)
+          # 核心修复1：删除local（函数外部不能用local，直接定义全局变量）
+          unzip_file_count=$(find ${NDK_UNZIP_DIR} -type f | wc -l)
           if [ ${unzip_file_count} -eq 0 ]; then
             echo "❌ 解压后目录为空，无任何有效文件，判定解压失败"
-            # 打印压缩包完整内容，确认是否为压缩包本身问题
             echo "🔍 压缩包内完整文件列表（前50个）："
             sudo unzip -l ${NDK_ZIP} | head -50
             sudo rm -f ${NDK_ZIP}
@@ -148,16 +145,14 @@ jobs:
           echo "✅ 解压成功，共解压出 ${unzip_file_count} 个文件"
 
           echo -e "\n🔍 动态查找真实NDK根目录..."
-          # 优化find：放宽深度限制+精准匹配toolchains路径，适配所有解压结构
           REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -type d -path "*/toolchains/llvm/prebuilt" 2>/dev/null | head -n1)
           if [ -n "${REAL_NDK_DIR}" ]; then
-            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))  # 向上两级定位根目录
+            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))
           fi
-          # 兜底：若未找到，直接查找含toolchains的一级子目录（最常见场景）
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
+            # 核心修复2：删除local（函数外部不能用local，直接定义变量）
             REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 2 -type d -name "*toolchains*" 2>/dev/null | head -n1 | xargs dirname 2>/dev/null)
           fi
-          # 最终校验：仍未找到则报错，打印全量目录结构
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
             echo "❌ 未找到真实NDK根目录，打印全量解压目录结构："
             find ${NDK_UNZIP_DIR} -type d | head -30

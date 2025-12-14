@@ -68,20 +68,23 @@ jobs:
             }
           }
 
-          COMPILER_H_PATH="${KERNEL_DIR}/include/linux/compiler.h"
-          if [ ! -f ${COMPILER_H_PATH} ]; then
-            echo "❌ 内核源码中未找到compiler.h，搜索可能路径..."
-            find ${KERNEL_DIR} -name "compiler.h" -type f | head -5
-            exit 1
-          fi
-          ASM_DIR="${KERNEL_DIR}/arch/arm64/include/asm"
-          if [ ! -d ${ASM_DIR} ]; then
-            echo "❌ ARM64架构asm头文件目录缺失！"
-            find ${KERNEL_DIR}/arch -name "asm" -type d | head -5
-            exit 1
-          fi
-          echo "✅ 内核源码下载完成，compiler.h路径：${COMPILER_H_PATH}"
-          echo "✅ ARM64 asm头文件目录：${ASM_DIR}"
+          # 内核头文件多路径校验，提前确保核心目录存在
+          KERNEL_INCLUDE_DIRS=(
+            "${KERNEL_DIR}/include"
+            "${KERNEL_DIR}/include/linux"
+            "${KERNEL_DIR}/include/uapi"
+            "${KERNEL_DIR}/arch/arm64/include"
+            "${KERNEL_DIR}/arch/arm64/include/asm"
+            "${KERNEL_DIR}/arch/arm64/include/uapi"
+            "${KERNEL_DIR}/include/asm-generic"
+          )
+          for DIR in "${KERNEL_INCLUDE_DIRS[@]}"; do
+            if [ ! -d ${DIR} ]; then
+              echo "❌ 内核头文件目录 ${DIR} 缺失！"
+              exit 1
+            fi
+          done
+          echo "✅ 内核源码下载完成，所有核心头文件目录均存在"
           echo "KERNEL_DIR=${KERNEL_DIR}" >> $GITHUB_ENV
         continue-on-error: false
 
@@ -286,48 +289,56 @@ jobs:
           echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
         continue-on-error: false
 
-      # 核心调整：将头文件校验步骤移到「内核+NDK下载配置完成后，编译前」，确保所有依赖文件已存在
-      - name: Check Critical Header Files Existence
+      - name: Check & Collect All Header Files Paths
         run: |
           set -euo pipefail; set -x
-          # 优化：用全局环境变量引用内核目录，避免硬编码错误
           KERNEL_DIR=${KERNEL_DIR}
           PROJECT_ROOT=${PWD}
-          # 定义需要校验的头文件（含路径，覆盖内核默认+自定义/第三方）
-          declare -a REQUIRED_HEADERS=(
-            # 自身源码文件（确保检出正常）
-            "${PROJECT_ROOT}/hello.c"
-            # 内核默认核心头文件（依赖内核源码下载完成）
+          CUSTOM_HEADER_PATHS=""
+
+          # 1. 校验自身源码文件
+          if [ ! -f "${PROJECT_ROOT}/hello.c" ]; then
+            echo "❌ 核心源码文件 hello.c 缺失！"
+            exit 1
+          fi
+
+          # 2. 校验内核核心头文件（覆盖所有隐藏关键目录）
+          KERNEL_REQUIRED_HEADERS=(
             "${KERNEL_DIR}/include/linux/compiler.h"
             "${KERNEL_DIR}/arch/arm64/include/asm/rwonce.h"
-            # 自定义/第三方头文件（重点校验kpmodule.h，适配2种常见存放位置）
-            "${PROJECT_ROOT}/kpmodule.h"
-            "${PROJECT_ROOT}/include/kpmodule.h"
+            "${KERNEL_DIR}/include/uapi/linux/types.h"
+            "${KERNEL_DIR}/include/asm-generic/bug.h"
           )
-
-          # 遍历校验，缺失则报错并提示解决方案
-          for HEADER in "${REQUIRED_HEADERS[@]}"; do
+          for HEADER in "${KERNEL_REQUIRED_HEADERS[@]}"; do
             if [ ! -f "${HEADER}" ]; then
-              # 特殊处理kpmodule.h（自定义头文件，给出具体排查方向）
-              if [[ "${HEADER}" == *"kpmodule.h"* ]]; then
-                echo "❌ 自定义/第三方头文件 ${HEADER} 缺失！请确认："
-                echo "1. kpmodule.h 是否已放入项目根目录或 include 子目录；"
-                echo "2. 若为第三方依赖头文件，是否已下载对应依赖包并放置正确路径；"
-                echo "3. 头文件名是否拼写正确（区分大小写）。"
-                # 搜索项目内所有kpmodule相关文件，辅助排查
-                echo "🔍 项目内搜索kpmodule相关文件："
-                find ${PROJECT_ROOT} -name "*kpmodule*" -type f 2>/dev/null || echo "无匹配文件"
-                exit 1
-              else
-                # 内核头文件缺失，提示重新下载内核源码
-                echo "❌ 内核头文件 ${HEADER} 缺失！内核源码下载异常，请重新执行流程。"
-                # 搜索内核目录内相关文件，辅助排查
-                find ${KERNEL_DIR} -name "$(basename ${HEADER})" -type f 2>/dev/null || echo "内核目录内无该文件"
-                exit 1
-              fi
+              echo "❌ 内核头文件 ${HEADER} 缺失！"
+              find ${KERNEL_DIR} -name "$(basename ${HEADER})" -type f 2>/dev/null || echo "内核目录无此文件"
+              exit 1
             fi
           done
-          echo "✅ 所有关键头文件均存在，编译前校验通过"
+
+          # 3. 动态搜索自定义头文件 kpmodule.h（适配任何存放位置，彻底杜绝缺失）
+          KP_MODULE_PATH=$(find ${PROJECT_ROOT} -name "kpmodule.h" -type f 2>/dev/null | head -n1)
+          if [ -z "${KP_MODULE_PATH}" ]; then
+            echo "❌ 自定义头文件 kpmodule.h 未在项目内找到！请确认文件已上传至仓库，或检查文件名拼写（区分大小写）"
+            exit 1
+          fi
+          # 提取 kpmodule.h 所在目录，添加到搜索路径
+          KP_MODULE_DIR=$(dirname ${KP_MODULE_PATH})
+          CUSTOM_HEADER_PATHS="-I${KP_MODULE_DIR}"
+          echo "✅ 找到自定义头文件 kpmodule.h，路径：${KP_MODULE_PATH}，搜索路径：${KP_MODULE_DIR}"
+
+          # 4. 收集项目内所有include目录（批量添加，适配多目录存放）
+          PROJECT_INCLUDE_DIRS=$(find ${PROJECT_ROOT} -name "include" -type d 2>/dev/null | tr '\n' ' ')
+          for DIR in ${PROJECT_INCLUDE_DIRS}; do
+            CUSTOM_HEADER_PATHS="${CUSTOM_HEADER_PATHS} -I${DIR}"
+          done
+          echo "✅ 项目内所有include目录：${PROJECT_INCLUDE_DIRS}"
+
+          # 5. 拼接全量头文件搜索路径，导出为环境变量供编译使用
+          FULL_CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/include/uapi -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm -I${KERNEL_DIR}/arch/arm64/include/uapi -I${KERNEL_DIR}/include/asm-generic -I${PROJECT_ROOT} ${CUSTOM_HEADER_PATHS}"
+          echo "✅ 全量头文件搜索路径：${FULL_CFLAGS}"
+          echo "FULL_CFLAGS=${FULL_CFLAGS}" >> $GITHUB_ENV
         continue-on-error: false
 
       - name: Compile AArch64 Kernel Module
@@ -339,7 +350,7 @@ jobs:
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
-          # 补全所有可能的头文件搜索路径（覆盖内核+项目自定义/第三方，杜绝后续缺失）
+          # 核心优化：使用预先生成的全量头文件路径，强制传递给编译器，确保Makefile继承
           PROJECT_ROOT=${PWD}
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \
@@ -351,9 +362,12 @@ jobs:
             CROSS_COMPILE=aarch64-linux-android- \
             KERNELDIR="${KERNEL_DIR}" \
             ARCH=arm64 \
-            # 全量头文件路径：内核通用+架构专属+项目根目录+项目include子目录（覆盖所有场景）
-            CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux -I${KERNEL_DIR}/arch/arm64/include -I${KERNEL_DIR}/arch/arm64/include/asm -I${PROJECT_ROOT} -I${PROJECT_ROOT}/include" || {
+            CFLAGS="${FULL_CFLAGS}" \
+            # 强制覆盖Makefile内CFLAGS，确保路径生效
+            EXTRA_CFLAGS="${FULL_CFLAGS}" || {
             echo "Error: 编译失败！"
+            # 编译失败时打印所有头文件搜索路径，辅助排查
+            echo "当前生效的头文件搜索路径：${FULL_CFLAGS}"
             exit 1
           }
           echo "✅ AArch64内核模块编译成功！"

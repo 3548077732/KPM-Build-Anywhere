@@ -43,9 +43,44 @@ jobs:
           sudo sed -i 's@https://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
           sudo sed -i 's@https://security.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
-          sudo apt-get install -y --no-install-recommends build-essential wget curl unzip findutils
+          # 新增：安装git（用于下载内核源码）
+          sudo apt-get install -y --no-install-recommends build-essential wget curl unzip findutils git
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
           md5sum --version || echo "md5sum已内置，无需安装"
+        continue-on-error: false
+
+      # 核心新增步骤1：下载安卓内核源码（适配aarch64架构+TARGET_API 31，提供compiler.h等头文件）
+      - name: Download Android Kernel Source (aarch64, API 31)
+        run: |
+          set -euo pipefail; set -x
+          KERNEL_VERSION="android12-5.10"  # 适配API 31的稳定内核版本（安卓12对应内核5.10）
+          KERNEL_DIR="/home/runner/android-kernel-source"
+          KERNEL_REPO="https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/common.git"  # 清华镜像，下载快
+
+          # 清理旧内核源码
+          sudo rm -rf ${KERNEL_DIR}
+          sudo mkdir -p ${KERNEL_DIR}
+          sudo chmod -R 777 ${KERNEL_DIR}
+          sudo chown -R runner:runner ${KERNEL_DIR}
+
+          # 克隆内核源码（仅拉取指定分支，提速）
+          git clone --depth 1 --branch ${KERNEL_VERSION} ${KERNEL_REPO} ${KERNEL_DIR} || {
+            echo "❌ 清华镜像克隆失败，切换官方镜像重试..."
+            git clone --depth 1 --branch ${KERNEL_VERSION} https://android.googlesource.com/kernel/common.git ${KERNEL_DIR} || {
+              echo "❌ 内核源码下载失败，终止流程"
+              exit 1
+            }
+          }
+
+          # 校验内核头文件是否存在（确认compiler.h可用）
+          COMPILER_H_PATH="${KERNEL_DIR}/include/linux/compiler.h"
+          if [ ! -f ${COMPILER_H_PATH} ]; then
+            echo "❌ 内核源码中未找到compiler.h，搜索可能路径..."
+            find ${KERNEL_DIR} -name "compiler.h" -type f | head -5
+            exit 1
+          fi
+          echo "✅ 内核源码下载完成，compiler.h路径：${COMPILER_H_PATH}"
+          echo "KERNEL_DIR=${KERNEL_DIR}" >> $GITHUB_ENV  # 导出内核目录到全局，供后续编译使用
         continue-on-error: false
 
       - name: Download & Extract Android NDK (r25c, Super Fault-Tolerant)
@@ -224,8 +259,6 @@ jobs:
           echo "找到编译器：${COMPILER}"
 
           echo "=== 校验编译器完整性 ==="
-          # 核心修复1：删除错误的ELF二进制判断（NDK r25c为shell脚本封装，正常特性）
-          # 核心修复2：强化脚本有效性校验（可执行+能正常输出版本，即视为有效）
           if [ ! -x "${COMPILER}" ]; then
             echo "编译器无执行权限，赋权..."
             sudo chmod 777 ${COMPILER}
@@ -235,7 +268,6 @@ jobs:
               exit 1
             fi
           fi
-          # 新增：校验脚本能否正常调用（最核心的有效性判断，替代文件类型判断）
           ${COMPILER} --version >/dev/null 2>&1 || {
             echo "Error: 编译器脚本执行失败！文件信息："
             file ${COMPILER}
@@ -245,7 +277,6 @@ jobs:
           echo "=== 验证编译器版本 ==="
           ${COMPILER} --version || {
             echo "Error: 编译器执行失败！"
-            # 脚本无需ldd（ldd用于二进制），改为打印脚本前10行排查
             echo "编译器脚本核心内容（前10行）："
             head -n 10 ${COMPILER}
             exit 1
@@ -263,6 +294,7 @@ jobs:
           echo "=== Makefile核心内容（前50行） ==="
           head -n 50 Makefile 2>/dev/null
 
+          # 核心修复2：编译时传递内核头文件路径（KERNELDIR）+ 补全内核模块编译必要参数
           echo "=== 开始交叉编译 ==="
           make -j$(nproc) V=2 \
             CC="${COMPILER}" \
@@ -270,7 +302,11 @@ jobs:
             TARGET_ARCH=aarch64 \
             TARGET_API=31 \
             NDK="${NDK_HOME}" \
-            CROSS_COMPILE=aarch64-linux-android- || {
+            CROSS_COMPILE=aarch64-linux-android- \
+            KERNELDIR="${KERNEL_DIR}" \  # 关键：指定内核源码目录，编译器从这里找compiler.h
+            ARCH=arm64 \  # 明确架构为arm64（即aarch64）
+            CFLAGS="-I${KERNEL_DIR}/include -I${KERNEL_DIR}/include/linux"  # 显式添加内核头文件搜索路径
+            || {
             echo "Error: 编译失败！"
             exit 1
           }

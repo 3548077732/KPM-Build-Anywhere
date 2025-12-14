@@ -29,37 +29,69 @@ jobs:
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
         continue-on-error: false
 
-      # 关键修复：用官方Action安装NDK（自动配路径+环境，无偏差）
-      - name: Setup Android NDK (r26b for API31)
+      # 步骤1：安装NDK（锁定r26b，稳定兼容）
+      - name: Setup Android NDK (r26b)
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26b  # 稳定版，完美兼容aarch64-linux-android31-clang
-          add-to-path: true  # 自动将NDK工具链加入系统PATH，全局可调用
+          ndk-version: r26b
+          add-to-path: false  # 禁用自动加路径，手动精准配置避免偏差
         continue-on-error: false
 
-      # 验证编译器：确认工具链已正常识别（提前排错）
-      - name: Verify cross-compiler
+      # 步骤2：精准配置NDK工具链路径（核心修复，确保编译器能被找到）
+      - name: Configure NDK Toolchain Path
         run: |
-          echo "=== NDK Toolchain Path ==="
-          echo $PATH | grep ndk  # 查看NDK路径是否已加入
-          echo "=== Compiler Version ==="
-          aarch64-linux-android31-clang --version  # 验证编译器可用性
+          # 自动获取NDK安装路径（Action已注入NDK_HOME环境变量）
+          echo "NDK安装路径：${NDK_HOME}"
+          # 拼接工具链二进制目录（clang编译器所在核心路径）
+          NDK_TOOLCHAIN_BIN="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          # 强制加入系统PATH，当前步骤即时生效
+          export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
+          echo "工具链路径：${NDK_TOOLCHAIN_BIN}"
+          # 持久化到全局环境，后续步骤可用
+          echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
+          echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
+          
+          # 验证路径是否正确：列出目录下aarch64架构编译器，直观确认文件存在
+          echo -e "\n=== 工具链目录下aarch64相关编译器列表 ==="
+          ls -la ${NDK_TOOLCHAIN_BIN} | grep "aarch64-linux-android" | grep clang
         continue-on-error: false
 
-      # 编译安卓内核模块（显式指定编译器，双重保险）
+      # 步骤3：验证编译器可用性（适配两种命名格式，无遗漏）
+      - name: Verify Cross-Compiler
+        run: |
+          # 优先尝试带API31后缀的命名；若不存在，用通用命名+--target指定API
+          if command -v aarch64-linux-android31-clang &> /dev/null; then
+            COMPILER="aarch64-linux-android31-clang"
+          else
+            COMPILER="aarch64-linux-android-clang"  # NDK通用编译器命名
+          fi
+          echo "最终使用编译器：${COMPILER}"
+          # 验证编译器版本，确保可用
+          ${COMPILER} --version || {
+            echo "编译器验证失败，检查工具链目录文件！"
+            ls -la ${NDK_TOOLCHAIN_BIN} | grep "aarch64-linux-android-clang"
+            exit 1
+          }
+          # 持久化编译器名称，后续编译复用
+          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
+        continue-on-error: false
+
+      # 步骤4：编译安卓内核模块（精准传参，适配内核模块编译需求）
       - name: Compile AArch64 Kernel Module
         run: |
-          echo "=== Check Makefile ==="
+          echo "=== 确认Makefile存在 ==="
           ls -la | grep -E "Makefile|makefile"
           [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
-          echo "=== Start Cross-Compiling ==="
-          # 显式指定编译器，覆盖Makefile可能的路径问题，确保精准调用
+          
+          echo "=== 开始交叉编译（AArch64架构） ==="
+          # 显式传编译器+API级别参数，覆盖Makefile可能的配置偏差
           make -j$(nproc) V=1 \
-            CC=aarch64-linux-android31-clang \
-            CXX=aarch64-linux-android31-clang++
+            CC=${COMPILER} \
+            CXX=aarch64-linux-android-clang++ \
+            TARGET_API=31  # 强制指定目标API级别，适配项目需求
         continue-on-error: false
 
-      # 内核模块项目通常无check/distcheck，按需保留/注释
+      # 内核模块项目通常无测试/发布校验，按需保留
       - name: Run tests (if supported)
         run: make check
         continue-on-error: true

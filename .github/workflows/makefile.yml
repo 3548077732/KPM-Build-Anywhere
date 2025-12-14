@@ -15,20 +15,23 @@ jobs:
         working-directory: ${{ github.workspace }}
 
     steps:
+      # 步骤1：拉取代码（19-23行）
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+        continue-on-error: false
 
+      # 步骤2：安装依赖（26-47行）
       - name: Install build dependencies
         run: |
-          # 换国内阿里云源，避免国外源超时
+          # 换国内阿里云源，规避Runner访问超时
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
-          # 更新源缓存+修复依赖
+          # 更新源缓存+修复依赖残缺
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
           sudo apt-get install -f -y
-          # 正确安装依赖（--no-install-recommends 位置合规）
+          # 安装核心编译依赖（语法合规）
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             autoconf \
@@ -38,96 +41,30 @@ jobs:
             pkg-config
           # 清理缓存释放空间
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
-          # 校验核心工具
-          echo "=== 核心工具版本校验 ==="
+          # 校验工具可用性
           gcc --version || exit 1
           make --version || exit 1
           autoconf --version || exit 1
-        continue-on-error: false  # 步骤级配置，与 run 同级缩进
-
-      - name: Generate Makefile (configure)
-        run: ./configure
-        continue-on-error: false  # 同级缩进，语法合规
-
-      - name: Compile project
-        run: |
-          echo "=== 开始多线程编译 ==="
-          make -j$(nproc) V=1  # V=1 打印详细日志，便于排错
-        continue-on-error: false  # 关键修复：移出 run 命令块，与 run 同级
-
-      - name: Run unit tests (make check)
-        run: make check
         continue-on-error: false
 
-      - name: Verify release package (make distcheck)
-        run: make distcheck
-        continue-on-error: false
-            automake \
-            libtool \
-            texinfo \
-            pkg-config
-          # 5. 清理apt缓存，释放Runner空间，避免后续步骤磁盘不足
-          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
-          # 6. 校验核心工具是否安装成功，提前排查隐患
-          echo "=== 核心工具版本校验 ==="
-          gcc --version || exit 1
-          make --version || exit 1
-          autoconf --version || exit 1
-
-      # 配置生成：失败立即终止，避免无效编译
+      # 步骤3：生成Makefile（50-52行）
       - name: Generate Makefile (configure)
         run: ./configure
         continue-on-error: false
 
-      # 编译：多线程加速，适配Runner性能，输出编译日志便于排查
+      # 步骤4：编译项目（55-61行，重点修复此处！）
       - name: Compile project
         run: |
-          echo "=== 开始多线程编译 ==="
-          make -j$(nproc) V=1  # V=1 打印详细编译日志，报错可快速定位
-          continue-on-error: false
-          
+          echo "=== 多线程编译 ==="
+          make -j$(nproc) V=1  # 详细日志便于排错
+        continue-on-error: false  # 第61行：与run同级缩进，语法绝对合规
+
+      # 步骤5：执行测试（64-66行）
       - name: Run unit tests (make check)
         run: make check
         continue-on-error: false
 
+      # 步骤6：校验发布包（69-71行）
       - name: Verify release package (make distcheck)
         run: make distcheck
         continue-on-error: false
-          pkg-config \
-          # 可选：若项目依赖其他库，补充正确包名（例：openssl依赖 libssl-dev）
-          --no-install-recommends  # 减少冗余依赖，加速安装
-          # 4. 排查输出：打印已安装核心工具版本，方便定位问题
-          gcc --version
-          make --version
-          autoconf --version
-
-      - name: Autoconf generate Makefile
-        run: ./configure
-        continue-on-error: false
-
-      - name: Compile project
-        run: make -j$(nproc)  # 多线程加速，适配runner核心数
-
-      - name: Run unit tests (make check)
-        run: make check
-
-      - name: Verify release package (make distcheck)
-        run: make distcheck
-
-      # 执行 Autoconf 配置（生成 Makefile）
-      - name: Autoconf generate Makefile
-        run: ./configure
-        # 配置失败立即终止，减少无效执行
-        continue-on-error: false
-
-      # 编译项目（原 "Install dependencies" 命名错误，修正为编译逻辑）
-      - name: Compile project
-        run: make -j$(nproc)  # 多线程编译，提升 CI 效率（适配 runner 核心数）
-
-      # 执行单元测试/功能校验
-      - name: Run unit tests (make check)
-        run: make check
-
-      # 执行发布包完整性校验（Autoconf 项目标准发布前校验步骤）
-      - name: Verify release package (make distcheck)
-        run: make distcheck

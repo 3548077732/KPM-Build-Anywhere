@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-22.04
     defaults:
       run:
-        # 核心修正：shell格式合规化，含{0}占位符（GitHub Actions强制要求）
+        # 终极合规修复：1. 去掉/usr/bin/（内置识别bash）；2. 强制用{0}占位符（GitHub Actions唯一规范）
         shell: bash -euo pipefail -c 'set -x; {0}'
         working-directory: ${{ github.workspace }}
 

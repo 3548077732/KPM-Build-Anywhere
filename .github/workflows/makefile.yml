@@ -15,7 +15,6 @@ jobs:
         working-directory: ${{ github.workspace }}
 
     steps:
-      # 1. 拉取代码（确保全量拉取，无文件缺失）
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
@@ -23,17 +22,62 @@ jobs:
           show-progress: true
         continue-on-error: false
 
-      # 2. 安装依赖（补全configure可能需要的检测工具）
       - name: Install build dependencies
         run: |
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
           sudo apt-get install -f -y
-          # 补全configure依赖的检测工具，避免配置失败
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             autoconf \
+            automake \
+            libtool \
+            texinfo \
+            pkg-config \
+            libc6-dev
+          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+          autoconf --version || exit 1
+          automake --version || exit 1
+        continue-on-error: false
+
+      - name: Generate configure script
+        run: |
+          autoreconf -i -f -v
+          if [ ! -f ./configure ]; then
+            echo "Fatal: configure not generated!"
+            ls -la
+            exit 1
+          fi
+          chmod +x ./configure
+        continue-on-error: false
+
+      - name: Generate Makefile (configure)
+        run: |
+          ls -la
+          ./configure -v
+        continue-on-error: false
+
+      # 编译步骤（第82行重点修复！语法+执行双重保障）
+      - name: Compile project
+        run: |
+          echo "=== 确认Makefile存在（configure生成结果校验） ==="
+          ls -la | grep Makefile  # 精准验证Makefile是否生成
+          if [ ! -f ./Makefile ]; then
+            echo "Fatal: Makefile not found!"
+            exit 1
+          fi
+          echo "=== 开始多线程编译（详细日志） ==="
+          make -j$(nproc) V=1  # V=1 打印编译细节，失败快速定位
+        continue-on-error: false  # 第82行：与run严格同级，2空格递进，语法绝对合规
+
+      - name: Run unit tests (make check)
+        run: make check
+        continue-on-error: false
+
+      - name: Verify release package (make distcheck)
+        run: make distcheck
+        continue-on-error: false
             automake \
             libtool \
             texinfo \

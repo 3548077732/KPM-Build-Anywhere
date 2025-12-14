@@ -29,89 +29,94 @@ jobs:
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
         continue-on-error: false
 
-      # 关键优化：换稳定NDK r25c（兼容性拉满，工具链无缺失）+ 动态适配路径
+      # 核心修复：换用户可写目录解压+加sudo权限+强化压缩包校验
       - name: Download & Extract Android NDK (r25c)
         run: |
           NDK_VERSION="r25c"
-          # 优先阿里云镜像（下载快+不易损坏，避免谷歌源文件残缺）
+          # 阿里云镜像（高速稳定，避免压缩包损坏）
           NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
-          NDK_INSTALL_DIR="/opt/android-ndk-${NDK_VERSION}"
+          # 关键：换runner用户可写目录（~/.android-ndk），彻底规避/opt权限问题
+          NDK_INSTALL_DIR="${HOME}/.android-ndk-${NDK_VERSION}"
+          NDK_ZIP_PATH="${HOME}/ndk.zip"
 
-          # 1. 稳定下载（延长超时+多次重试+进度提示，避免文件损坏）
+          # 1. 稳定下载（显示文件大小+进度，下载后校验文件非空）
           echo "📥 下载NDK ${NDK_VERSION}..."
-          wget -P ./ --timeout=600 --tries=5 --show-progress -O ndk.zip "${NDK_URL}" || {
+          wget -O "${NDK_ZIP_PATH}" --timeout=600 --tries=5 --show-progress --progress=bar:force "${NDK_URL}" || {
             echo "备用源重试..."
             NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
-            wget -P ./ --timeout=600 --tries=5 --show-progress -O ndk.zip "${NDK_URL}" || exit 1
+            wget -O "${NDK_ZIP_PATH}" --timeout=600 --tries=5 --show-progress --progress=bar:force "${NDK_URL}" || exit 1
           }
-
-          # 2. 解压（加verbose，确认解压过程无报错）
-          echo "📦 解压NDK到 ${NDK_INSTALL_DIR}..."
-          unzip -q -v ndk.zip -d /opt/ || {
-            echo "NDK解压失败，文件可能损坏！"
-            rm -f ndk.zip
-            exit 1
-          }
-          if [ ! -d "${NDK_INSTALL_DIR}" ]; then
-            echo "解压目录不存在，打印/opt目录结构："
-            ls -la /opt/
+          # 校验压缩包非空（避免下载空文件）
+          if [ ! -s "${NDK_ZIP_PATH}" ]; then
+            echo "Error: NDK压缩包为空，下载失败！"
+            rm -f "${NDK_ZIP_PATH}"
             exit 1
           fi
+          echo "✅ 下载完成，压缩包大小：$(du -sh "${NDK_ZIP_PATH}" | awk '{print $1}')"
 
-          # 3. 动态获取工具链系统目录（不硬编码，适配所有x86_64 Runner）
-          echo -e "\n🔍 自动识别NDK工具链系统目录..."
+          # 2. 解压（加sudo保障权限，打印详细日志，避免静默失败）
+          echo "📦 解压NDK到 ${NDK_INSTALL_DIR}..."
+          # 先删除旧目录（避免残留干扰）
+          rm -rf "${NDK_INSTALL_DIR}"
+          # 解压时打印详细过程，便于定位失败原因（去掉-q静默模式）
+          sudo unzip -v "${NDK_ZIP_PATH}" -d "${HOME}/" || {
+            echo "Error: NDK解压失败！压缩包可能损坏，重新下载..."
+            rm -f "${NDK_ZIP_PATH}"
+            exit 1
+          }
+          # 解压后目录名固定为android-ndk-${NDK_VERSION}，确认存在
+          if [ ! -d "${NDK_INSTALL_DIR}" ]; then
+            echo "Error: 解压目录不存在，打印用户目录下NDK相关文件："
+            ls -la "${HOME}/" | grep "android-ndk"
+            exit 1
+          fi
+          # 给解压目录赋runner用户权限（避免sudo解压后权限归属root）
+          sudo chown -R runner:runner "${NDK_INSTALL_DIR}"
+          echo "✅ NDK解压完成，目录权限已修正"
+
+          # 3. 动态匹配工具链路径
           PREBUILT_DIR="${NDK_INSTALL_DIR}/toolchains/llvm/prebuilt"
-          # 筛选linux-x86_64相关目录（Runner是x86_64架构，精准匹配）
           SYSTEM_DIR=$(ls -d ${PREBUILT_DIR}/linux-* 2>/dev/null | head -n1)
           if [ -z "${SYSTEM_DIR}" ]; then
-            echo "工具链系统目录未找到，打印prebuilt目录："
+            echo "Error: 工具链系统目录未找到，打印prebuilt目录："
             ls -la ${PREBUILT_DIR}/
             exit 1
           fi
           NDK_TOOLCHAIN_BIN="${SYSTEM_DIR}/bin"
-          echo "✅ 自动匹配工具链路径：${NDK_TOOLCHAIN_BIN}"
+          echo "✅ 工具链路径：${NDK_TOOLCHAIN_BIN}"
 
-          # 4. 配置环境+强制赋执行权限（核心解决不可执行问题）
+          # 4. 配置环境+赋编译器执行权限
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
           echo "NDK_HOME=${NDK_INSTALL_DIR}" >> $GITHUB_ENV
           echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
           echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
-          # 给所有clang编译器加执行权限，避免权限不足
-          sudo chmod +x ${NDK_TOOLCHAIN_BIN}/*clang* 2>/dev/null
-          echo "✅ NDK配置+权限赋予完成"
+          chmod +x ${NDK_TOOLCHAIN_BIN}/*clang* 2>/dev/null
+          echo "✅ NDK配置完成"
         continue-on-error: false
 
-      # 精准校验：全局搜索编译器+确认可用性
       - name: Verify AArch64 Compiler
         run: |
-          echo "=== 全局搜索aarch64编译器（确保文件存在） ==="
-          # 全局查找编译器，排除路径偏差
+          echo "=== 全局搜索aarch64编译器 ==="
           COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android-clang" -type f | head -n1)
           if [ -z "${COMPILER}" ]; then
-            echo "Error: 全局未找到aarch64编译器！打印NDK工具链目录文件："
+            echo "Error: 未找到编译器，打印工具链目录文件："
             ls -la ${NDK_TOOLCHAIN_BIN}/ | grep "clang"
             exit 1
           fi
-          echo "✅ 全局找到编译器：${COMPILER}"
+          echo "✅ 找到编译器：${COMPILER}"
 
-          # 确认编译器可执行
           if [ ! -x "${COMPILER}" ]; then
-            echo "编译器无执行权限，重新赋权..."
-            sudo chmod +x "${COMPILER}"
-            if [ ! -x "${COMPILER}" ]; then
-              echo "Error: 编译器赋权失败！"
-              exit 1
-            fi
+            echo "赋执行权限..."
+            chmod +x "${COMPILER}"
           fi
 
-          # 最终验证版本，确认工具可用
-          echo -e "\n=== 编译器版本信息 ==="
+          echo -e "\n=== 编译器版本 ==="
           ${COMPILER} --version || {
             echo "Error: 编译器执行失败！"
-            file "${COMPILER}"  # 查看文件类型，排查是否是二进制文件
+            file "${COMPILER}"
             exit 1
           }
-          echo "✅ 编译器验证完全通过"
+          echo "✅ 编译器验证通过"
           echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
         continue-on-error: false
 

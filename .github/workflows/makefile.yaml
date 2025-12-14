@@ -195,7 +195,6 @@ jobs:
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
           echo "NDK_HOME=${REAL_NDK_DIR}" >> $GITHUB_ENV
           echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
-          # 核心修复1：将COMPILER导出到全局环境，供后续步骤使用
           echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
           echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
           echo "✅ NDK配置完成，工具链路径：${NDK_TOOLCHAIN_BIN}"
@@ -214,7 +213,6 @@ jobs:
           echo "NDK_TOOLCHAIN_BIN: ${NDK_TOOLCHAIN_BIN}"
 
           echo "=== 确认编译器 ==="
-          # 核心修复2：用${变量:-}容错，避免未定义时触发set -u报错，再兜底查找
           if [ -z "${COMPILER:-}" ] || [ ! -f "${COMPILER:-}" ]; then
             echo "🔹 编译器变量未定义/无效，兜底搜索..."
             COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android*-clang" -type f 2>/dev/null | head -n1)
@@ -226,6 +224,8 @@ jobs:
           echo "找到编译器：${COMPILER}"
 
           echo "=== 校验编译器完整性 ==="
+          # 核心修复1：删除错误的ELF二进制判断（NDK r25c为shell脚本封装，正常特性）
+          # 核心修复2：强化脚本有效性校验（可执行+能正常输出版本，即视为有效）
           if [ ! -x "${COMPILER}" ]; then
             echo "编译器无执行权限，赋权..."
             sudo chmod 777 ${COMPILER}
@@ -235,8 +235,9 @@ jobs:
               exit 1
             fi
           fi
-          file ${COMPILER} | grep -q "ELF 64-bit" || {
-            echo "Error: 编译器非有效二进制文件！文件信息："
+          # 新增：校验脚本能否正常调用（最核心的有效性判断，替代文件类型判断）
+          ${COMPILER} --version >/dev/null 2>&1 || {
+            echo "Error: 编译器脚本执行失败！文件信息："
             file ${COMPILER}
             exit 1
           }
@@ -244,7 +245,9 @@ jobs:
           echo "=== 验证编译器版本 ==="
           ${COMPILER} --version || {
             echo "Error: 编译器执行失败！"
-            ldd ${COMPILER}
+            # 脚本无需ldd（ldd用于二进制），改为打印脚本前10行排查
+            echo "编译器脚本核心内容（前10行）："
+            head -n 10 ${COMPILER}
             exit 1
           }
           echo "✅ 编译器验证通过"

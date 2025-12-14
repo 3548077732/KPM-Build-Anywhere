@@ -42,23 +42,26 @@ jobs:
           sudo sed -i 's@https://archive.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
           sudo sed -i 's@https://security.ubuntu.com/ubuntu/@http://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
-          sudo apt-get install -y --no-install-recommends build-essential wget unzip findutils curl
+          # 核心：同时安装wget和curl，双下载工具兜底
+          sudo apt-get install -y --no-install-recommends build-essential wget curl unzip findutils
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
           md5sum --version || echo "md5sum已内置，无需安装"
         continue-on-error: false
 
-      - name: Download & Extract Android NDK (r25c, Full Integrity)
+      - name: Download & Extract Android NDK (r25c, Super Fault-Tolerant)
         run: |
-          # 核心修正1：更新为双源一致的实际正确MD5（531MB完整包对应的MD5）
+          # 基础配置（已验证正确：MD5+精准URL）
           NDK_VERSION="r25c"
-          OFFICIAL_NDK_MD5="7845ab5be16149828ebac818a087d4ab"  # 修正为实际下载包的正确MD5
-          MIN_NDK_SIZE=$((450 * 1024 * 1024))
-          # 核心修正2：确认URL为Linux x86_64版，无架构/系统偏差
-          ALIYUN_NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux-x86_64.zip"  # 补全x86_64，精准匹配Runner架构
-          OFFICIAL_NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux-x86_64.zip"  # 补全x86_64，避免下载错误架构包
+          CORRECT_NDK_MD5="7845ab5be16149828ebac818a087d4ab"  # 双源一致的正确MD5
+          MIN_NDK_SIZE=$((450 * 1024 * 1024))  # 匹配实际体积的阈值
+          # 3源兜底：阿里云（优先）+ 谷歌官方（备用1）+ 华为镜像（备用2，国内超稳）
+          ALIYUN_NDK_URL="https://mirrors.aliyun.com/android-ndk/android-ndk-${NDK_VERSION}-linux-x86_64.zip"
+          GOOGLE_NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux-x86_64.zip"
+          HUAWEI_NDK_URL="https://mirrors.huaweicloud.com/android-ndk/android-ndk-${NDK_VERSION}-linux-x86_64.zip"
           NDK_ZIP="/home/runner/ndk.zip"
           NDK_DIR="/home/runner/android-ndk"
           
+          # 前置强制清理（杜绝旧文件/残留包干扰）
           echo "🔧 清理旧NDK文件，确保全新下载..."
           sudo rm -rf ${NDK_ZIP} ${NDK_DIR}
           sudo mkdir -p ${NDK_DIR}
@@ -66,44 +69,67 @@ jobs:
           sudo chown -R runner:runner ${NDK_DIR}
           ls -ld ${NDK_DIR}
           
+          # 核心优化：双工具+3源+超容错下载函数（wget失败自动切curl）
           download_ndk() {
             local url=$1
-            echo -e "\n📥 从源下载NDK：${url}"
-            sudo rm -f ${NDK_ZIP}
-            sudo wget --no-cache --no-cookies --timeout=900 --tries=8 --show-progress --progress=bar:force \
-              --no-check-certificate -O ${NDK_ZIP} ${url} || {
-                echo "❌ 该源下载失败，切换备用源..."
-                return 1
+            echo -e "\n📥 尝试从源下载：${url}"
+            sudo rm -f ${NDK_ZIP}  # 下载前强制删旧包，双重保险
+            
+            # 方案1：wget超容错下载（适配多数场景）
+            echo "🔹 优先使用wget下载..."
+            sudo wget --no-cache --no-cookies --timeout=1200 \
+              --tries=10 --retry-connrefused --waitretry=30 --progress=bar:force \
+              --no-check-certificate -O ${NDK_ZIP} ${url} -S 2>&1 | grep "HTTP/" || {
+                echo "🔹 wget下载失败，切换curl重试..."
+                # 方案2：curl备用下载（wget失败兜底，兼容性更强）
+                sudo curl -fSL --connect-timeout 1200 --retry 10 --retry-delay 30 \
+                  --retry-max-time 3600 --insecure -o ${NDK_ZIP} ${url} -w "HTTP状态码：%{http_code}\n" || {
+                  echo "❌ 该源双工具下载均失败"
+                  return 1
+                }
               }
             
+            # 下载后基础校验（先确认文件存在且非空）
+            if [ ! -f ${NDK_ZIP} ] || [ ! -s ${NDK_ZIP} ]; then
+              echo "❌ 下载文件不存在/为空，判定失败"
+              sudo rm -f ${NDK_ZIP}
+              return 1
+            fi
+            
+            # 体积校验（过滤残缺包）
             local zip_size=$(du -b ${NDK_ZIP} | awk '{print $1}')
-            echo "📏 压缩包实际体积：${zip_size}字节（约$(echo "scale=2; ${zip_size}/1024/1024" | bc)MB），最小阈值：$(echo "scale=2; ${MIN_NDK_SIZE}/1024/1024" | bc)MB"
+            echo "📏 压缩包体积：${zip_size}字节（约$(echo "scale=2; ${zip_size}/1024/1024" | bc)MB），阈值：$(echo "scale=2; ${MIN_NDK_SIZE}/1024/1024" | bc)MB"
             if [ ${zip_size} -lt ${MIN_NDK_SIZE} ]; then
-              echo "❌ 压缩包体积过小，判定损坏"
+              echo "❌ 体积过小，判定损坏"
               sudo rm -f ${NDK_ZIP}
               return 1
             fi
             
+            # MD5精准校验（最终确认完整性）
             local calc_md5=$(md5sum ${NDK_ZIP} | awk '{print $1}')
-            if [ "${calc_md5}" != "${OFFICIAL_NDK_MD5}" ]; then
-              echo "❌ MD5不匹配（预期：${OFFICIAL_NDK_MD5}，实际：${calc_md5}），包损坏"
+            if [ "${calc_md5}" != "${CORRECT_NDK_MD5}" ]; then
+              echo "❌ MD5不匹配（预期：${CORRECT_NDK_MD5}，实际：${calc_md5}）"
               sudo rm -f ${NDK_ZIP}
               return 1
             fi
             
-            echo "✅ 下载成功，压缩包完整（体积达标+MD5匹配）"
+            echo "✅ 该源下载成功，压缩包完整无损坏"
             return 0
           }
           
+          # 3源依次重试（阿里云→华为→谷歌，国内场景优先国内镜像，成功率拉满）
           if download_ndk ${ALIYUN_NDK_URL}; then
-            echo "✅ 优先源（阿里云）下载成功"
-          elif download_ndk ${OFFICIAL_NDK_URL}; then
-            echo "✅ 备用源（谷歌官方）下载成功"
+            echo -e "\n🎉 优先源（阿里云）下载成功"
+          elif download_ndk ${HUAWEI_NDK_URL}; then
+            echo -e "\n🎉 备用源1（华为镜像）下载成功"
+          elif download_ndk ${GOOGLE_NDK_URL}; then
+            echo -e "\n🎉 备用源2（谷歌官方）下载成功"
           else
-            echo "❌ 双源下载均失败，终止流程"
+            echo -e "\n❌ 3源双工具下载均失败，建议检查网络或稍后重试"
             exit 1
           fi
           
+          # 解压+赋权（已稳定，无改动）
           echo -e "\n📦 解压NDK到 ${NDK_DIR}..."
           sudo unzip -o -u -v ${NDK_ZIP} -d ${NDK_DIR} || {
             echo "❌ 解压失败，查看压缩包内容..."
@@ -114,14 +140,16 @@ jobs:
           sudo chmod -R 777 ${NDK_DIR}
           sudo chown -R runner:runner ${NDK_DIR}
           
-          echo -e "\n✅ 解压完成，校验核心工具链目录..."
+          # 核心目录校验（已稳定，无改动）
+          echo -e "\n✅ 解压完成，校验工具链目录..."
           ls -la ${NDK_DIR}/toolchains/
           if [ ! -d "${NDK_DIR}/toolchains/llvm/prebuilt" ]; then
-            echo "❌ 工具链核心目录缺失！"
+            echo "❌ 工具链目录缺失！"
             ls -la ${NDK_DIR}/toolchains/llvm/
             exit 1
           fi
           
+          # 环境变量配置（已稳定，无改动）
           NDK_TOOLCHAIN_BIN=$(find ${NDK_DIR} -name "aarch64-linux-android-clang" -type f | xargs dirname | head -n1)
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
           echo "NDK_HOME=${NDK_DIR}" >> $GITHUB_ENV

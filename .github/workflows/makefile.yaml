@@ -1,4 +1,4 @@
-name: Makefile CI
+name: Android Kernel Module CI
 
 on:
   push:
@@ -25,15 +25,48 @@ jobs:
         run: |
           sudo sed -i 's@archive.ubuntu.com@mirrors.aliyun.com@g' /etc/apt/sources.list
           sudo apt-get update -y --fix-missing
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            wget unzip  # 新增：用于下载解压NDK
+          sudo apt-get install -y --no-install-recommends build-essential
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
         continue-on-error: false
 
-      # 关键新增：安装安卓NDK（匹配API31，含aarch64-linux-android31-clang）
-      - name: Install Android NDK (r25c for API31)
+      # 关键修复：用官方Action安装NDK（自动配路径+环境，无偏差）
+      - name: Setup Android NDK (r26b for API31)
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b  # 稳定版，完美兼容aarch64-linux-android31-clang
+          add-to-path: true  # 自动将NDK工具链加入系统PATH，全局可调用
+        continue-on-error: false
+
+      # 验证编译器：确认工具链已正常识别（提前排错）
+      - name: Verify cross-compiler
         run: |
+          echo "=== NDK Toolchain Path ==="
+          echo $PATH | grep ndk  # 查看NDK路径是否已加入
+          echo "=== Compiler Version ==="
+          aarch64-linux-android31-clang --version  # 验证编译器可用性
+        continue-on-error: false
+
+      # 编译安卓内核模块（显式指定编译器，双重保险）
+      - name: Compile AArch64 Kernel Module
+        run: |
+          echo "=== Check Makefile ==="
+          ls -la | grep -E "Makefile|makefile"
+          [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
+          echo "=== Start Cross-Compiling ==="
+          # 显式指定编译器，覆盖Makefile可能的路径问题，确保精准调用
+          make -j$(nproc) V=1 \
+            CC=aarch64-linux-android31-clang \
+            CXX=aarch64-linux-android31-clang++
+        continue-on-error: false
+
+      # 内核模块项目通常无check/distcheck，按需保留/注释
+      - name: Run tests (if supported)
+        run: make check
+        continue-on-error: true
+
+      - name: Verify release (if supported)
+        run: make distcheck
+        continue-on-error: true
           # 下载稳定版NDK r25c（适配API31，兼容aarch64交叉编译）
           NDK_VERSION=r25c
           NDK_URL=https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip

@@ -8,20 +8,47 @@ on:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    # 指定稳定 LTS 系统，避免 ubuntu-latest 版本波动兼容问题
+    runs-on: ubuntu-22.04
+    # 明确 shell 环境，保障跨 runner 兼容性
+    defaults:
+      run:
+        shell: bash
+        # 编译产物/配置文件默认存项目根目录，无需额外指定工作目录
+        working-directory: ${{ github.workspace }}
 
     steps:
-    - uses: actions/checkout@v4
+      # 拉取代码（核心前置步骤，优先执行）
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        # 拉取完整提交历史，部分项目 check/distcheck 依赖历史信息
+        with:
+          fetch-depth: 0
 
-    - name: configure
-      run: ./configure
+      # 安装编译核心依赖（Autoconf 类项目必备，需在 configure 前执行）
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y --fix-missing
+          sudo apt-get install -y \
+            build-essential \  # 基础编译工具链（gcc、make 等）
+            autoconf automake libtool \  # Autoconf 构建工具集
+            texinfo \  # 部分项目 distcheck 生成文档依赖
+            pkg-config  # 依赖检测工具（可选，适配多依赖项目）
 
-    - name: Install dependencies
-      run: make
+      # 执行 Autoconf 配置（生成 Makefile）
+      - name: Autoconf generate Makefile
+        run: ./configure
+        # 配置失败立即终止，减少无效执行
+        continue-on-error: false
 
-    - name: Run check
-      run: make check
+      # 编译项目（原 "Install dependencies" 命名错误，修正为编译逻辑）
+      - name: Compile project
+        run: make -j$(nproc)  # 多线程编译，提升 CI 效率（适配 runner 核心数）
 
-    - name: Run distcheck
-      run: make distcheck
+      # 执行单元测试/功能校验
+      - name: Run unit tests (make check)
+        run: make check
+
+      # 执行发布包完整性校验（Autoconf 项目标准发布前校验步骤）
+      - name: Verify release package (make distcheck)
+        run: make distcheck

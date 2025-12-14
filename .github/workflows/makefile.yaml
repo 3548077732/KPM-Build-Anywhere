@@ -27,6 +27,8 @@ jobs:
       run:
         shell: bash
         working-directory: ${{ github.workspace }}
+        # 新增：shell执行错误立即捕获，打印详细信息
+        shell: bash -euo pipefail -c 'set -x; $0'
 
     steps:
       - name: Checkout source code
@@ -56,18 +58,16 @@ jobs:
           GOOGLE_NDK_URL="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
           HUAWEI_NDK_URL="https://mirrors.huaweicloud.com/android-ndk/android-ndk-${NDK_VERSION}-linux.zip"
           NDK_ZIP="/home/runner/ndk.zip"
-          NDK_UNZIP_DIR="/home/runner/android-ndk-unzip"  # 解压目标目录（空目录）
-          REAL_NDK_DIR=""  # 存储真实NDK根目录（含toolchains的目录）
-          
-          # 前置强制清理
-          echo "🔧 清理旧文件，确保全新下载解压..."
+          NDK_UNZIP_DIR="/home/runner/android-ndk-unzip"
+          REAL_NDK_DIR=""
+
+          echo "🔧 清理旧文件..."
           sudo rm -rf ${NDK_ZIP} ${NDK_UNZIP_DIR}
           sudo mkdir -p ${NDK_UNZIP_DIR}
           sudo chmod -R 777 ${NDK_UNZIP_DIR}
           sudo chown -R runner:runner ${NDK_UNZIP_DIR}
           ls -ld ${NDK_UNZIP_DIR}
-          
-          # 双工具+3源下载函数（无改动，已稳定）
+
           download_ndk() {
             local url=$1
             echo -e "\n📥 尝试从源下载：${url}"
@@ -84,12 +84,12 @@ jobs:
                 }
               }
             if [ ! -f ${NDK_ZIP} ] || [ ! -s ${NDK_ZIP} ]; then
-              echo "❌ 下载文件不存在/为空，判定失败"
+              echo "❌ 下载文件不存在/为空"
               sudo rm -f ${NDK_ZIP}
               return 1
             fi
             local zip_size=$(du -b ${NDK_ZIP} | awk '{print $1}')
-            echo "📏 压缩包体积：${zip_size}字节（约$(echo "scale=2; ${zip_size}/1024/1024" | bc)MB），阈值：$(echo "scale=2; ${MIN_NDK_SIZE}/1024/1024" | bc)MB"
+            echo "📏 压缩包体积：${zip_size}字节（约$(echo "scale=2; ${zip_size}/1024/1024" | bc)MB）"
             if [ ${zip_size} -lt ${MIN_NDK_SIZE} ]; then
               echo "❌ 体积过小，判定损坏"
               sudo rm -f ${NDK_ZIP}
@@ -101,11 +101,10 @@ jobs:
               sudo rm -f ${NDK_ZIP}
               return 1
             fi
-            echo "✅ 该源下载成功，压缩包完整无损坏"
+            echo "✅ 该源下载成功"
             return 0
           }
-          
-          # 3源依次重试（无改动）
+
           if download_ndk ${ALIYUN_NDK_URL}; then
             echo -e "\n🎉 优先源（阿里云）下载成功"
           elif download_ndk ${HUAWEI_NDK_URL}; then
@@ -113,11 +112,10 @@ jobs:
           elif download_ndk ${GOOGLE_NDK_URL}; then
             echo -e "\n🎉 备用源2（谷歌官方）下载成功"
           else
-            echo -e "\n❌ 3源双工具下载均失败，建议检查网络或稍后重试"
+            echo -e "\n❌ 3源双工具下载均失败"
             exit 1
           fi
-          
-          # 核心优化：解压+动态定位真实NDK根目录（解决路径嵌套问题）
+
           echo -e "\n📦 解压NDK到 ${NDK_UNZIP_DIR}..."
           sudo unzip -o -u -v ${NDK_ZIP} -d ${NDK_UNZIP_DIR} || {
             echo "❌ 解压失败，查看压缩包内容..."
@@ -125,39 +123,46 @@ jobs:
             sudo rm -f ${NDK_ZIP}
             exit 1
           }
-          # 解压后立即打印目录结构，直观确认解压结果
-          echo -e "\n📂 解压后目标目录（${NDK_UNZIP_DIR}）内容："
+          echo -e "\n📂 解压后目标目录内容："
           ls -la ${NDK_UNZIP_DIR}/
-          
-          # 动态定位真实NDK根目录（含toolchains/llvm/prebuilt的目录，适配所有嵌套结构）
+
           echo -e "\n🔍 动态查找真实NDK根目录..."
-          REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -type d -path "*/toolchains/llvm/prebuilt" | head -n1 | xargs dirname | xargs dirname)
+          # 优化find：限制深度+容错，无结果时不报错
+          REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 3 -type d -path "*/toolchains/llvm/prebuilt" 2>/dev/null | head -n1)
+          if [ -n "${REAL_NDK_DIR}" ]; then
+            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))  # 向上两级找根目录
+          fi
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
-            echo "❌ 未找到含工具链的NDK根目录！打印全量目录结构排查："
-            find ${NDK_UNZIP_DIR} -type d | grep -E "toolchains|prebuilt"  # 搜索关键目录
+            echo "❌ 未找到真实NDK根目录，搜索关键目录："
+            find ${NDK_UNZIP_DIR} -type d | grep -E "toolchains|prebuilt" | head -20
             sudo rm -f ${NDK_ZIP}
             exit 1
           fi
-          echo "✅ 找到真实NDK根目录：${REAL_NDK_DIR}"
-          
-          # 二次赋权（确保真实根目录下所有文件可操作）
+          echo "✅ 真实NDK根目录：${REAL_NDK_DIR}"
+
           sudo chmod -R 777 ${REAL_NDK_DIR}
           sudo chown -R runner:runner ${REAL_NDK_DIR}
-          
-          # 核心目录校验（基于真实根目录，无路径偏差）
-          echo -e "\n✅ 校验工具链核心目录..."
+
+          echo -e "\n✅ 校验工具链目录..."
           ls -la ${REAL_NDK_DIR}/toolchains/
           if [ ! -d "${REAL_NDK_DIR}/toolchains/llvm/prebuilt" ]; then
-            echo "❌ 工具链核心目录缺失！打印llvm目录内容："
+            echo "❌ 工具链核心目录缺失！"
             ls -la ${REAL_NDK_DIR}/toolchains/llvm/
             exit 1
           fi
-          echo "✅ 工具链目录校验通过"
-          
-          # 环境变量配置（基于真实NDK根目录，确保工具链可找到）
-          NDK_TOOLCHAIN_BIN=$(find ${REAL_NDK_DIR} -name "aarch64-linux-android-clang" -type f | xargs dirname | head -n1)
+
+          # 优化工具链路径搜索：容错+显式路径
+          NDK_TOOLCHAIN_BIN=$(find ${REAL_NDK_DIR} -name "aarch64-linux-android-clang" -type f 2>/dev/null | head -n1)
+          if [ -n "${NDK_TOOLCHAIN_BIN}" ]; then
+            NDK_TOOLCHAIN_BIN=$(dirname ${NDK_TOOLCHAIN_BIN})
+          fi
+          if [ -z "${NDK_TOOLCHAIN_BIN}" ] || [ ! -d "${NDK_TOOLCHAIN_BIN}" ]; then
+            echo "❌ 未找到工具链二进制目录！"
+            find ${REAL_NDK_DIR} -name "*aarch64-linux-android-clang*" -type f 2>/dev/null
+            exit 1
+          fi
           export PATH="${NDK_TOOLCHAIN_BIN}:${PATH}"
-          echo "NDK_HOME=${REAL_NDK_DIR}" >> $GITHUB_ENV  # 持久化真实NDK路径
+          echo "NDK_HOME=${REAL_NDK_DIR}" >> $GITHUB_ENV
           echo "NDK_TOOLCHAIN_BIN=${NDK_TOOLCHAIN_BIN}" >> $GITHUB_ENV
           echo "${NDK_TOOLCHAIN_BIN}" >> $GITHUB_PATH
           echo "✅ NDK配置完成，工具链路径：${NDK_TOOLCHAIN_BIN}"
@@ -165,33 +170,46 @@ jobs:
 
       - name: Verify AArch64 Compiler (Full Check)
         run: |
-          echo "=== 确认NDK_HOME ==="
-          if [ -z "${NDK_HOME}" ]; then
-            echo "Error: NDK_HOME缺失！"
+          echo "=== 确认环境变量 ==="
+          if [ -z "${NDK_HOME}" ] || [ -z "${NDK_TOOLCHAIN_BIN}" ]; then
+            echo "Error: NDK_HOME/NDK_TOOLCHAIN_BIN缺失！"
+            echo "当前环境变量：$(env | grep NDK)"
             exit 1
           fi
           echo "NDK_HOME: ${NDK_HOME}"
-          
+          echo "NDK_TOOLCHAIN_BIN: ${NDK_TOOLCHAIN_BIN}"
+
           echo "=== 搜索编译器 ==="
-          COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android-clang" -type f | head -n1)
+          COMPILER=$(find ${NDK_HOME} -name "aarch64-linux-android-clang" -type f 2>/dev/null | head -n1)
           if [ -z "${COMPILER}" ]; then
-            echo "Error: 编译器缺失！打印所有clang工具："
-            find ${NDK_HOME} -name "*clang*" -type f
+            echo "Error: 编译器缺失！搜索结果："
+            find ${NDK_HOME} -name "*aarch64-linux-android-clang*" -type f 2>/dev/null
             exit 1
           fi
           echo "找到编译器：${COMPILER}"
-          
-          echo "=== 赋执行权限 ==="
-          sudo chmod 777 ${COMPILER}
+
+          echo "=== 校验编译器完整性 ==="
+          # 确认是可执行二进制文件，避免解压损坏
           if [ ! -x "${COMPILER}" ]; then
-            echo "Error: 无执行权限！"
-            exit 1
+            echo "编译器无执行权限，赋权..."
+            sudo chmod 777 ${COMPILER}
+            if [ ! -x "${COMPILER}" ]; then
+              echo "Error: 赋权后仍无执行权限，文件信息："
+              file ${COMPILER}
+              exit 1
+            fi
           fi
-          
-          echo "=== 验证版本 ==="
-          ${COMPILER} --version || {
-            echo "Error: 编译器执行失败！文件信息："
+          # 检查文件类型是否为二进制
+          file ${COMPILER} | grep -q "ELF 64-bit" || {
+            echo "Error: 编译器非有效二进制文件！文件信息："
             file ${COMPILER}
+            exit 1
+          }
+
+          echo "=== 验证编译器版本 ==="
+          ${COMPILER} --version || {
+            echo "Error: 编译器执行失败！"
+            ldd ${COMPILER}  # 检查编译器依赖库是否缺失
             exit 1
           }
           echo "✅ 编译器验证通过"
@@ -203,12 +221,22 @@ jobs:
           echo "=== 确认Makefile ==="
           ls -la | grep -E "Makefile|makefile"
           [ -f Makefile ] || [ -f makefile ] || { echo "Makefile not found!"; exit 1; }
+          # 打印Makefile前50行，确认核心编译参数（便于排查硬编码）
+          echo "=== Makefile核心内容（前50行） ==="
+          head -n 50 Makefile 2>/dev/null
 
           echo "=== 开始交叉编译 ==="
-          make -j$(nproc) V=1 \
+          # 显式传递全量关键参数，覆盖Makefile硬编码，适配内核模块编译
+          make -j$(nproc) V=2 \
             CC="${COMPILER}" \
-            CXX=$(find ${NDK_HOME} -name "aarch64-linux-android-clang++" -type f | head -n1) \
-            TARGET_API=31
+            CXX=$(find ${NDK_HOME} -name "aarch64-linux-android-clang++" -type f 2>/dev/null | head -n1) \
+            TARGET_ARCH=aarch64 \
+            TARGET_API=31 \
+            NDK="${NDK_HOME}" \
+            CROSS_COMPILE=aarch64-linux-android- || {
+            echo "Error: 编译失败！"
+            exit 1
+          }
         continue-on-error: false
 
       - name: Run tests (if supported)

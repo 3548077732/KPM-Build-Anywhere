@@ -133,7 +133,6 @@ jobs:
           }
           echo -e "\n📂 解压后目标目录内容（含子目录）："
           ls -la ${NDK_UNZIP_DIR}/
-          # 核心修复1：删除local（函数外部不能用local，直接定义全局变量）
           unzip_file_count=$(find ${NDK_UNZIP_DIR} -type f | wc -l)
           if [ ${unzip_file_count} -eq 0 ]; then
             echo "❌ 解压后目录为空，无任何有效文件，判定解压失败"
@@ -145,14 +144,22 @@ jobs:
           echo "✅ 解压成功，共解压出 ${unzip_file_count} 个文件"
 
           echo -e "\n🔍 动态查找真实NDK根目录..."
+          # 核心修复1：正确定位根目录（find找到prebuilt后，仅执行1次dirname，而非2次）
           REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -type d -path "*/toolchains/llvm/prebuilt" 2>/dev/null | head -n1)
           if [ -n "${REAL_NDK_DIR}" ]; then
-            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))
+            REAL_NDK_DIR=$(dirname $(dirname ${REAL_NDK_DIR}))  # 原错误：多1次dirname，已修正？不，重新算：假设prebuilt路径是 A/toolchains/llvm/prebuilt，dirname1次是A/toolchains/llvm，再dirname1次是A/toolchains？不对！正确NDK根目录是A，所以find路径应该调整，或者dirname次数修正。哦，正确逻辑：find找含toolchains的一级子目录，直接定位根目录！
+            # 重新优化根目录查找（彻底避免路径重复，最直观可靠）
+            REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 2 -type d -exec test -d "{}/toolchains/llvm/prebuilt" \; -print | head -n1)
           fi
+          # 核心修复2：兜底查找优化（直接找含toolchains/llvm/prebuilt的目录，无需多步dirname）
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
-            # 核心修复2：删除local（函数外部不能用local，直接定义变量）
-            REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -maxdepth 2 -type d -name "*toolchains*" 2>/dev/null | head -n1 | xargs dirname 2>/dev/null)
+            REAL_NDK_DIR=$(find ${NDK_UNZIP_DIR} -type d -exec test -d "{}/toolchains/llvm/prebuilt" \; -print | head -n1)
           fi
+          # 最终兜底：若仍未找到，直接取解压目录下的唯一子目录（NDK默认解压结构）
+          if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
+            REAL_NDK_DIR=$(ls -d ${NDK_UNZIP_DIR}/*/ 2>/dev/null | head -n1)
+          fi
+          # 最终校验
           if [ -z "${REAL_NDK_DIR}" ] || [ ! -d "${REAL_NDK_DIR}" ]; then
             echo "❌ 未找到真实NDK根目录，打印全量解压目录结构："
             find ${NDK_UNZIP_DIR} -type d | head -30
@@ -165,10 +172,11 @@ jobs:
           sudo chown -R runner:runner ${REAL_NDK_DIR}
 
           echo -e "\n✅ 校验工具链目录..."
+          # 校验路径基于正确根目录，无重复
           ls -la ${REAL_NDK_DIR}/toolchains/
           if [ ! -d "${REAL_NDK_DIR}/toolchains/llvm/prebuilt" ]; then
             echo "❌ 工具链核心目录缺失！打印llvm目录内容："
-            ls -la ${REAL_NDK_DIR}/toolchains/llvm/
+            ls -la ${REAL_NDK_DIR}/toolchains/llvm/ 2>/dev/null || echo "llvm目录不存在"
             exit 1
           fi
 

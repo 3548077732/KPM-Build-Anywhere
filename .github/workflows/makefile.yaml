@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-22.04
     defaults:
       run:
-        # 核心修正：合并shell配置，删除重复定义，同时保留错误捕获+工作目录
-        shell: bash -euo pipefail -c 'set -x; $0'
+        # 核心修正：shell格式合规化，含{0}占位符（GitHub Actions强制要求）
+        shell: bash -euo pipefail -c 'set -x; {0}'
         working-directory: ${{ github.workspace }}
 
     steps:

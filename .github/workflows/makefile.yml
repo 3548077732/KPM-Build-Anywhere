@@ -15,25 +15,74 @@ jobs:
         working-directory: ${{ github.workspace }}
 
     steps:
+      # 1. 拉取代码（确保全量拉取，无文件缺失）
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉全代码，避免文件缺失
+          fetch-depth: 0
           show-progress: true
         continue-on-error: false
 
+      # 2. 安装依赖（补全configure可能需要的检测工具）
       - name: Install build dependencies
         run: |
           sudo sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo sed -i s@/security.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
           sudo apt-get update -y --fix-missing --allow-releaseinfo-change
           sudo apt-get install -f -y
+          # 补全configure依赖的检测工具，避免配置失败
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             autoconf \
             automake \
             libtool \
             texinfo \
+            pkg-config \
+            libc6-dev  # 部分项目configure需C库头文件
+          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+          # 校验核心工具
+          autoconf --version || exit 1
+          automake --version || exit 1
+        continue-on-error: false
+
+      # 3. 生成configure脚本（强制生成，加严格校验）
+      - name: Generate configure script
+        run: |
+          autoreconf -i -f -v  # -v 打印生成详细日志，便于排查
+          # 强制校验configure是否存在，不存在直接报错+打印文件列表
+          if [ ! -f ./configure ]; then
+            echo "Fatal: configure script not generated!"
+            ls -la ./  # 打印根目录所有文件，确认是否生成
+            exit 1
+          fi
+          chmod +x ./configure  # 额外加执行权限，避免权限不足
+        continue-on-error: false
+
+      # 4. 执行configure（第70行重点修复！语法+执行双保障）
+      - name: Generate Makefile (configure)
+        run: |
+          echo "=== 当前目录文件列表（确认configure存在） ==="
+          ls -la ./  # 先打印文件，排除路径/文件缺失问题
+          echo "=== 开始执行configure（详细日志） ==="
+          ./configure -v  # -v 打印详细配置过程，失败能定位缺什么依赖
+        continue-on-error: false  # 第70行（此句）与run同级，缩进绝对合规
+
+      # 5. 编译项目
+      - name: Compile project
+        run: |
+          echo "=== 开始多线程编译 ==="
+          make -j$(nproc) V=1
+        continue-on-error: false
+
+      # 6. 执行测试
+      - name: Run unit tests (make check)
+        run: make check
+        continue-on-error: false
+
+      # 7. 校验发布包
+      - name: Verify release package (make distcheck)
+        run: make distcheck
+        continue-on-error: false
             pkg-config
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
           # 校验依赖工具完整性

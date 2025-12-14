@@ -8,32 +8,52 @@ on:
 
 jobs:
   build:
-    # 指定稳定 LTS 系统，避免 ubuntu-latest 版本波动兼容问题
-    runs-on: ubuntu-22.04
-    # 明确 shell 环境，保障跨 runner 兼容性
+    runs-on: ubuntu-22.04  # 固化稳定系统，减少包兼容问题
     defaults:
       run:
         shell: bash
-        # 编译产物/配置文件默认存项目根目录，无需额外指定工作目录
         working-directory: ${{ github.workspace }}
 
     steps:
-      # 拉取代码（核心前置步骤，优先执行）
       - name: Checkout source code
         uses: actions/checkout@v4
-        # 拉取完整提交历史，部分项目 check/distcheck 依赖历史信息
         with:
           fetch-depth: 0
 
-      # 安装编译核心依赖（Autoconf 类项目必备，需在 configure 前执行）
+      # 核心修复：依赖安装步骤（解决找不到包裹问题）
       - name: Install build dependencies
         run: |
-          sudo apt-get update -y --fix-missing
+          # 1. 强制更新apt源缓存（关键，避免旧缓存找不到包）
+          sudo apt-get update -y --fix-missing --allow-releaseinfo-change
+          # 2. 修复依赖冲突，清理无效包（容错）
+          sudo apt-get install -f -y
+          # 3. 安装核心依赖（修正语法：反斜杠后无空格，包名精简适配ubuntu22.04）
           sudo apt-get install -y \
-            build-essential \  # 基础编译工具链（gcc、make 等）
-            autoconf automake libtool \  # Autoconf 构建工具集
-            texinfo \  # 部分项目 distcheck 生成文档依赖
-            pkg-config  # 依赖检测工具（可选，适配多依赖项目）
+          build-essential \
+          autoconf \
+          automake \
+          libtool \
+          texinfo \
+          pkg-config \
+          # 可选：若项目依赖其他库，补充正确包名（例：openssl依赖 libssl-dev）
+          --no-install-recommends  # 减少冗余依赖，加速安装
+          # 4. 排查输出：打印已安装核心工具版本，方便定位问题
+          gcc --version
+          make --version
+          autoconf --version
+
+      - name: Autoconf generate Makefile
+        run: ./configure
+        continue-on-error: false
+
+      - name: Compile project
+        run: make -j$(nproc)  # 多线程加速，适配runner核心数
+
+      - name: Run unit tests (make check)
+        run: make check
+
+      - name: Verify release package (make distcheck)
+        run: make distcheck
 
       # 执行 Autoconf 配置（生成 Makefile）
       - name: Autoconf generate Makefile
